@@ -1,0 +1,21 @@
+{
+  "project_root": "/mnt/data/qt_v6_work/PY-GIT-Quant-main",
+  "patched_files": {
+    "quote_aware.py": "/mnt/data/qt_v6_work/PY-GIT-Quant-main/src/ib_quant_kit/execx/quote_aware.py",
+    "risk/helpers.py": "/mnt/data/qt_v6_work/PY-GIT-Quant-main/src/ib_quant_kit/risk/helpers.py",
+    "intraday_bot.py": "missing",
+    "runbot.py": "missing",
+    "main.py": "missing"
+  },
+  "requirements_updated": true,
+  "removed_duplicates": [
+    "/mnt/data/qt_v6_work/PY-GIT-Quant-main/src/ib_quant_kit/orders/order_book.py",
+    "/mnt/data/qt_v6_work/PY-GIT-Quant-main/src/ib_quant_kit/orders/order_book.simple.bak"
+  ],
+  "ib_client_top_level_callbacks_present": {
+    "top_level_position": true,
+    "top_level_positionEnd": true,
+    "top_level_accountSummary": true,
+    "top_level_commissionReport": true
+  }
+}

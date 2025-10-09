@@ -1,0 +1,35 @@
+cd "C:\Users\bmseb\OneDrive\Desktop\Quant"
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+python .\main.py
+nohup python dashboard.py &
+
+
+
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+C:\Users\bmseb\OneDrive\Desktop\Quant\.venv\Scripts
+.venv\Scripts\Activate.ps1
+python .\main.py
+
+If new env
+# 1) create a local venv if it doesn't exist
+py -3.13 -m venv .venv
+
+# 2) allow scripts for this session + activate
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+.venv\Scripts\Activate.ps1"
+# 3) install deps (and your src package)
+pip install -r requirements.txt
+pip install -e .
+
+# 4) run
+python .\main.py
+
+
+git init
+git add .
+git commit -m "Clean upload from root"
+git branch -M main
+git remote add origin https://github.com/bmsebastian/PY-GIT-Quant.git
+git push -u origin main --force
