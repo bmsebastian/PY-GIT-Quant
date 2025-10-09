@@ -1,0 +1,179 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Quant v7 Dashboard</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
+      h1 { margin: 0 0 12px 0; }
+      .grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+      .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; }
+      .muted { color: #666; font-size: 12px;}
+      .row { display:flex; gap:12px; align-items:center; }
+      .chip { padding: 2px 8px; border-radius: 999px; border: 1px solid #ccc; font-size: 12px;}
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+  <body>
+    <h1>Quant Trading v7</h1>
+    <div class="muted">Auto-refreshing every 2 seconds</div>
+    <div class="grid">
+
+      <div class="card">
+        <div class="row"><h2 style="margin:0">Per-Symbol PnL</h2></div>
+        <table id="pnlTable">
+          <thead><tr><th>Symbol</th><th>Unrealized</th><th>Realized</th><th>Currency</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="row"><h2 style="margin:0">Trade Blotter</h2></div>
+        <table id="blotterTable">
+          <thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Qty</th><th>Price</th><th>Note</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    
+
+      <div class="card">
+        <div class="row"><h2 style="margin:0">PnL</h2></div>
+        <div class="row"><div>Unrealized:</div><strong id="pnlUnrl">0</strong><span id="pnlCur" class="chip">USD</span></div>
+        <div class="row"><div>Realized:</div><strong id="pnlRlzd">0</strong></div>
+      </div>
+      <div class="card">
+        <div class="row"><h2 style="margin:0">Circuit / Kill Switch</h2></div>
+        <div class="row">Trading Enabled: <strong id="circuitOn">?</strong></div>
+        <div class="row">Reason: <span id="circuitReason" class="chip"></span></div>
+        <div class="row">Tripped At: <span id="circuitAt" class="chip"></span></div>
+        <button id="killBtn" style="padding:8px 12px;border-radius:8px;border:1px solid #333;cursor:pointer">Toggle Kill</button>
+        <div class="muted">Guarded: Works only when <code>DRY_RUN=1</code>.</div>
+      </div>
+    
+      <div class="card">
+        <div class="row"><h2 style="margin:0">Positions</h2><span id="posCount" class="chip">0</span></div>
+        <table id="posTable">
+          <thead><tr><th>Account</th><th>Symbol</th><th>Type</th><th>Exchange</th><th>Qty</th><th>Avg Cost</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="row"><h2 style="margin:0">Orders</h2></div>
+        <pre id="orders" style="white-space:pre-wrap"></pre>
+      </div>
+      <div class="card">
+        <div class="row"><h2 style="margin:0">Risk</h2></div>
+        <pre id="risk" style="white-space:pre-wrap"></pre>
+      </div>
+    </div>
+    <script>
+      async function fetchJSON(url){ const r=await fetch(url); return r.json(); }
+      function setText(id, text){ document.getElementById(id).textContent = text; }
+      function renderPositions(rows){
+        const tbody = document.querySelector("#posTable tbody");
+        tbody.innerHTML = "";
+        for(const r of rows){
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td>${r.account||""}</td><td>${r.symbol||""}</td><td>${r.secType||""}</td><td>${r.exchange||""}</td><td>${r.position??""}</td><td>${r.avgCost??""}</td>`;
+          tbody.appendChild(tr);
+        }
+        document.getElementById("posCount").textContent = rows.length;
+      }
+      
+      async function toggleKill(){
+        if(!confirm("Toggle kill switch? This only works when DRY_RUN=1.")) return;
+        try{
+          const r = await fetch("/api/kill", {method:"POST"});
+          const data = await r.json();
+          if(!data.ok){ alert(data.error || "Kill failed"); }
+          await refresh();
+        }catch(e){ alert("Kill error: " + e); }
+      }
+      document.getElementById("killBtn").addEventListener("click", toggleKill);
+
+      async function refresh(){
+        try {
+          const [pos, ord, risk, pnl, circuit] = await Promise.all([
+            fetchJSON("/api/positions"),
+            fetchJSON("/api/orders"),
+            fetchJSON("/api/risk"),
+            fetchJSON("/api/pnl"),
+            fetchJSON("/api/circuit")
+          ]);
+          renderPositions(pos);
+          setText("orders", JSON.stringify(ord, null, 2));
+          setText("risk", JSON.stringify(risk, null, 2));
+          // PnL
+          setText("pnlUnrl", pnl.unrealized);
+          setText("pnlRlzd", pnl.realized);
+          setText("pnlCur", pnl.currency || 'USD');
+          // Circuit state
+          setText("circuitOn", circuit.trading_enabled ? 'Yes' : 'No');
+          setText("circuitReason", circuit.reason || '');
+          setText("circuitAt", circuit.tripped_at || '');
+        } catch(e){ console.error(e); }
+      }
+      setInterval(refresh, 2000);
+      refresh();
+    </script>
+  
+    <script>
+      const socket = io({ path: "/socket.io" , transports: ["websocket"]});
+      const ns = "/stream";
+      const chan = io(ns);
+
+      function renderPositions(rows){
+        const tbody = document.querySelector("#posTable tbody");
+        tbody.innerHTML = "";
+        for(const r of rows){
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td>${r.account||""}</td><td>${r.symbol||""}</td><td>${r.secType||""}</td><td>${r.exchange||""}</td><td>${r.position??""}</td><td>${r.avgCost??""}</td>`;
+          tbody.appendChild(tr);
+        }
+        document.getElementById("posCount").textContent = rows.length;
+      }
+
+      function renderPnLTable(rows){
+        const tbody = document.querySelector("#pnlTable tbody");
+        tbody.innerHTML = "";
+        for(const r of rows){
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td>${r.symbol||""}</td><td>${r.unrealized??""}</td><td>${r.realized??""}</td><td>${r.currency||""}</td>`;
+          tbody.appendChild(tr);
+        }
+      }
+
+      function renderBlotter(rows){
+        const tbody = document.querySelector("#blotterTable tbody");
+        tbody.innerHTML = "";
+        for(const r of rows){
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td>${r.time||""}</td><td>${r.symbol||""}</td><td>${r.action||""}</td><td>${r.qty??""}</td><td>${r.price??""}</td><td>${r.note||""}</td>`;
+          tbody.appendChild(tr);
+        }
+      }
+
+      function setText(id, text){ document.getElementById(id).textContent = text; }
+
+      const channel = io(ns);
+      channel.on("update", (payload) => {
+        try{
+          renderPositions(payload.positions||[]);
+          setText("orders", JSON.stringify(payload.orders||{}, null, 2));
+          setText("risk", JSON.stringify(payload.risk||{}, null, 2));
+          setText("pnlUnrl", (payload.pnl||{}).unrealized ?? 0);
+          setText("pnlRlzd", (payload.pnl||{}).realized ?? 0);
+          setText("pnlCur", (payload.pnl||{}).currency || "USD");
+          setText("circuitOn", (payload.circuit||{}).trading_enabled ? "Yes" : "No");
+          setText("circuitReason", (payload.circuit||{}).reason || "");
+          setText("circuitAt", (payload.circuit||{}).tripped_at || "");
+          renderPnLTable(payload.pnl_symbols||[]);
+          renderBlotter(payload.blotter||[]);
+        }catch(e){ console.error(e); }
+      });
+    </script>
+    
+</body>
+</html>
