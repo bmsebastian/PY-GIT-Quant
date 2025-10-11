@@ -1,0 +1,110 @@
+# ==============================
+# PYTHON / QUANT PROJECT GITIGNORE
+# ==============================
+
+# --- Python build & cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+Scripts/
+pip-wheel-metadata/
+
+# --- IDE / Editor metadata ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS generated files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs & runtime data ---
+*.log
+*.out
+*.err
+nohup.out
+logs/
+log/
+*.pid
+*.csv
+*.tsv
+
+# --- Secrets / configs ---
+.env
+.env.*
+config.local.py
+config_private.py
+secrets.json
+
+# --- Build / distribution / packaging ---
+build/
+dist/
+.eggs/
+*.egg-info/
+*.egg
+
+# --- Notebooks / checkpoints ---
+.ipynb_checkpoints/
+*.ipynb~
+*.nbconvert/
+
+# --- Caches / compiled binaries ---
+__pypackages__/
+*.so
+*.dll
+*.dylib
+*.o
+*.a
+
+# --- Data & results ---
+data/
+datasets/
+backtests/
+reports/
+outputs/
+results/
+tmp/
+temp/
+
+# --- Testing / coverage ---
+.coverage
+.tox/
+.nox/
+.pytest_cache/
+htmlcov/
+*.cover
+*.coverage
+*.pytest_cache/
+
+# --- Local project files ---
+config/
+drafts/
+notes/
+local_test/
+*.bak
+*.old
+
+# --- IBKR / Trading specific ---
+*.ibconfig
+*.iblogs
+ibkr_logs/
+ibkr_cache/
+credentials.txt
+account_*.json
+
+# --- Web / Dashboard (if using Flask, Streamlit) ---
+instance/
+*.db
+*.sqlite3
+__sessions__/
+uploads/
+cache/
