@@ -1,68 +1,127 @@
-import logging, random, time
-from typing import Dict
+# market_data.py — v14 (IB-only, with ensure_ib_connected helper)
+import logging, time
+from typing import Dict, Tuple, Optional
 from collections import deque
+from state_bus import STATE
 
 logger = logging.getLogger(__name__)
 
+FALLBACK_AFTER_S = 20
+HIST_REFETCH_COOLDOWN_S = 300
+HIST_DURATION = "1 D"
+HIST_BAR = "5 mins"
+
+def ensure_ib_connected(ib):
+    """Ensure IB instance is connected before any requests."""
+    if ib is None:
+        raise RuntimeError("IB instance is None")
+    if not getattr(ib, "isConnected", lambda: False)():
+        try:
+            ib.connect('127.0.0.1', 7497, clientId=1)
+            logger.info("Reconnected to IBKR on 127.0.0.1:7497 clientId=1")
+        except Exception as e:
+            raise RuntimeError(f"Unable to connect to IBKR: {e}")
+    else:
+        logger.info("IBKR connection verified.")
+
 class MarketDataBus:
     def __init__(self, ib, window: int = 600):
+        ensure_ib_connected(ib)
         self.ib = ib
         self.tickers: Dict[str, Dict] = {}
         self.history: Dict[str, deque] = {}
-        self.window = window
-        self._use_live = getattr(self.ib, "isConnected", lambda: False)()
-        self._subs = {}  # sym -> (contract, ticker)
+        self.window = int(window)
+        self._subs: Dict[str, Tuple] = {}
+        self._last_hist_fetch: Dict[str, float] = {}
+        try:
+            self.ib.reqMarketDataType(1)
+        except Exception as e:
+            logger.warning(f"reqMarketDataType(1) failed: {e}")
 
-    def subscribe_with_contract(self, symbol: str, contract):
+    def _record_tick(self, symbol: str, px: float, ts: float):
+        self.tickers[symbol] = {"last": px, "ts": ts}
+        self.history[symbol].append(px)
+        STATE.mark_tick(symbol, px)
+
+    def _now(self) -> float:
+        return time.time()
+
+    def subscribe(self, symbol: str, contract):
+        if not symbol or contract is None:
+            raise ValueError("subscribe() requires symbol and a valid IB Contract")
+        ensure_ib_connected(self.ib)
         symbol = symbol.strip().upper()
         self.tickers.setdefault(symbol, {"last": None, "ts": None})
         self.history.setdefault(symbol, deque(maxlen=self.window))
-        if getattr(self.ib, "isConnected", lambda: False)():
-            try:
-                t = self.ib.reqMktData(contract, "", False, False)
-                self._subs[symbol] = (contract, t)
-                self._use_live = True
-                logger.info(f"Subscribed LIVE {symbol}")
-            except Exception:
-                logger.exception(f"Live subscribe failed for {symbol}; falling back to SIM")
-        else:
-            logger.info(f"Subscribed (SIM) {symbol}")
+        try:
+            t = self.ib.reqMktData(contract, "", False, False)
+            self._subs[symbol] = (contract, t)
+            STATE.symbols_subscribed.add(symbol)
+            logger.info(f"Subscribed LIVE {symbol}")
+        except Exception as e:
+            logger.exception(f"Live subscribe failed for {symbol}: {e}")
+            raise
 
-    def subscribe(self, symbol: str):
-        self.subscribe_with_contract(symbol, None)
-
-    def _sim_tick(self, symbol: str):
-        rec = self.tickers[symbol]
-        base = rec["last"] or 100.0 + random.uniform(-1,1)
-        newp = round(base + random.uniform(-0.25, 0.25), 2)
-        ts = time.time()
-        self.tickers[symbol] = {"last": newp, "ts": ts}
-        self.history[symbol].append(newp)
-        return newp, ts
-
-    def _live_tick(self, symbol: str):
-        _, t = self._subs.get(symbol, (None, None))
-        if not t:
-            return self._sim_tick(symbol)
-        px = t.last or t.close or t.marketPrice() or t.midpoint()
+    def _live_tick(self, symbol: str) -> Tuple[Optional[float], float]:
+        contract, ticker = self._subs.get(symbol, (None, None))
+        if not ticker:
+            raise RuntimeError(f"{symbol} not subscribed")
+        px = ticker.last or ticker.close or ticker.marketPrice() or ticker.midpoint()
+        ts = self._now()
         if px is None:
-            ts = time.time()
             last = self.tickers[symbol].get("last")
             self.tickers[symbol] = {"last": last, "ts": ts}
             return last, ts
         px = float(px)
-        ts = time.time()
-        self.tickers[symbol] = {"last": px, "ts": ts}
-        self.history[symbol].append(px)
+        self._record_tick(symbol, px, ts)
         return px, ts
 
-    def get_last(self, symbol: str):
-        if self._use_live:
-            return self._live_tick(symbol)
-        return self._sim_tick(symbol)
+    def _historical_fallback(self, symbol: str):
+        last_hist_ts = self._last_hist_fetch.get(symbol)
+        now = self._now()
+        if last_hist_ts and (now - last_hist_ts) < HIST_REFETCH_COOLDOWN_S:
+            return
+        contract, _ = self._subs.get(symbol, (None, None))
+        if not contract:
+            return
+        try:
+            self._last_hist_fetch[symbol] = now
+            bars = self.ib.reqHistoricalData(
+                contract,
+                endDateTime="",
+                durationStr=HIST_DURATION,
+                barSizeSetting=HIST_BAR,
+                whatToShow="TRADES",
+                useRTH=0,
+                formatDate=1,
+                keepUpToDate=False,
+                chartOptions=[],
+            )
+            if bars and len(bars) > 0:
+                last_bar = bars[-1]
+                px = float(last_bar.close)
+                ts = self._now()
+                self._record_tick(symbol, px, ts)
+                logger.info(f"Historical fallback for {symbol}: {px}")
+        except Exception as e:
+            logger.warning(f"Fallback fetch failed for {symbol}: {e}")
+
+    def get_last(self, symbol: str) -> Tuple[Optional[float], float]:
+        px, ts = self._live_tick(symbol)
+        last_ts = self.tickers.get(symbol, {}).get("ts")
+        if (px is None) or (last_ts and (self._now() - last_ts) >= FALLBACK_AFTER_S):
+            self._historical_fallback(symbol)
+            px = self.tickers.get(symbol, {}).get("last")
+            ts = self.tickers.get(symbol, {}).get("ts") or ts
+        return px, ts
 
     def get_series(self, symbol: str, n: int):
-        if not self._use_live:
-            for _ in range(max(0, n - len(self.history[symbol]))):
-                self._sim_tick(symbol)
-        return list(self.history[symbol])[-n:]
+        return list(self.history.get(symbol, []))[-n:]
+
+    def snapshot(self) -> Dict:
+        now = self._now()
+        out = {}
+        for sym, rec in self.tickers.items():
+            ts = rec.get("ts")
+            out[sym] = {"last": rec.get("last"), "age_s": (int(now - ts) if ts else None)}
+        return out
