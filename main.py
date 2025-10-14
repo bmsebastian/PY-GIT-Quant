@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# main.py - QTrade v15B with scanner in main thread
+# main.py - QTrade v15C with no unicode characters
 import logging
 import sys
 import time
@@ -90,7 +90,7 @@ def main():
     global tm, subscription_manager, running
     
     logger.info("=" * 60)
-    logger.info(f"QTrade v15B Professional Multi-Asset System")
+    logger.info(f"QTrade v15C Professional Multi-Asset System")
     logger.info(f"ENV={ENV} | DRY_RUN={DRY_RUN}")
     logger.info(f"Dashboard: http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
     logger.info(f"Subscription limit: {IB_MAX_SUBSCRIPTIONS}")
@@ -106,28 +106,28 @@ def main():
     
     try:
         tm.start()
-        logger.info("✓ TradeManager started")
+        logger.info("[OK] TradeManager started")
     except Exception as e:
-        logger.exception("✗ TradeManager failed to start")
+        logger.exception("[ERROR] TradeManager failed to start")
         sys.exit(1)
     
     # Start dashboard in background thread
     try:
         start_dashboard_thread()
         time.sleep(1)  # Give dashboard a moment to start
-        logger.info("✓ Dashboard started")
+        logger.info("[OK] Dashboard started")
     except Exception as e:
         logger.warning(f"Dashboard failed to start: {e}")
     
     # Initialize Subscription Manager (NO BACKGROUND THREAD)
-    logger.info("Initializing v15B Subscription Manager...")
+    logger.info("Initializing v15C Subscription Manager...")
     try:
         subscription_manager = SubscriptionManager(
             ib=tm.ib,
             market_bus=tm.mdb
         )
         subscription_manager.start()
-        logger.info("✓ Subscription Manager started (main thread mode)")
+        logger.info("[OK] Subscription Manager started (main thread mode)")
         logger.info("  - Professional breakout scanner active")
         logger.info("  - Smart 50-subscription management active")
     except Exception as e:
@@ -265,11 +265,11 @@ def main():
         
         if subscription_manager:
             subscription_manager.stop()
-            logger.info("✓ Subscription Manager stopped")
+            logger.info("[OK] Subscription Manager stopped")
         
         if tm:
             tm.stop()
-            logger.info("✓ TradeManager stopped")
+            logger.info("[OK] TradeManager stopped")
         
         logger.info("Shutdown complete")
 

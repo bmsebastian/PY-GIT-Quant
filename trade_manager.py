@@ -1,4 +1,4 @@
-# trade_manager.py — v15B with proper position data handling
+# trade_manager.py — v15C FIX: Include contract in pos_rows
 import logging, time, math
 from typing import Dict, List, Tuple
 from state_bus import STATE
@@ -9,9 +9,9 @@ from config import PRIORITY_POSITION
 
 logger = logging.getLogger(__name__)
 
-POS_SYNC_SEC = 300  # refresh positions every 5 minutes
-WARMUP_DURATION_SEC = 60  # Warmup period duration
-WARMUP_SYNC_INTERVAL = 10  # Sync every 10s during warmup
+POS_SYNC_SEC = 300
+WARMUP_DURATION_SEC = 60
+WARMUP_SYNC_INTERVAL = 10
 
 class TradeManager:
     def __init__(self, dry_run: bool = False):
@@ -34,11 +34,9 @@ class TradeManager:
             
             self.mdb = MarketDataBus(self.ib)
             
-            # Set warmup end time
             self._warmup_end = time.time() + WARMUP_DURATION_SEC
             logger.info(f"Warmup period: {WARMUP_DURATION_SEC}s (faster position sync)")
             
-            # Initial position sync
             self._sync_positions(initial=True)
             
             logger.info("TradeManager started successfully")
@@ -52,7 +50,7 @@ class TradeManager:
         logger.info("TradeManager stopping...")
         try:
             if self.mdb:
-                pass  # Cleanup subscriptions if needed
+                pass
             
             self.ibc.disconnect()
             STATE.ib_connected = False
@@ -64,8 +62,7 @@ class TradeManager:
         """
         Sync positions from IB and update subscriptions.
         
-        Args:
-            initial: If True, this is the first sync on startup
+        v15C FIX: Store the FULL contract object in positions
         """
         from contracts import looks_nontradable_symbol, get_contract_multiplier
         
@@ -81,29 +78,28 @@ class TradeManager:
             for r in rows:
                 sym = r["symbol"]
                 
-                # Filter non-tradable symbols
                 if looks_nontradable_symbol(sym):
                     skipped.append(sym)
                     logger.info(f"Skipping non-tradable: {sym}")
                     continue
                 
-                # Get multiplier for proper P&L calculation
                 multiplier = get_contract_multiplier(r["contract"])
                 
-                # Store position data with v15 fields
+                # CRITICAL FIX: Store the FULL contract object
+                # This includes conId, lastTradeDateOrContractMonth, etc.
                 self.positions[sym] = {
                     "qty": r["qty"],
                     "avg": r["avgCost"],
-                    "contract": r["contract"],
+                    "contract": r["contract"],  # Full IB contract with all fields
                     "sec_type": r.get("sec_type", "STK"),
                     "local_symbol": r.get("local_symbol", sym),
                     "multiplier": multiplier,
                 }
                 new_syms.append(sym)
                 
-                # Subscribe to market data
                 if sym not in self.mdb._subs:
                     try:
+                        # Use the full contract from IB
                         self.mdb.subscribe(sym, r["contract"])
                         logger.info(f"Subscribed to {sym} (POSITION priority)")
                     except Exception as e:
@@ -112,12 +108,12 @@ class TradeManager:
             self._last_pos_sync = time.time()
             STATE.mark_pos_sync()
             
-            # Log summary
             if skipped:
-                logger.info(f"Filtered {len(skipped)} non-tradable symbols: {', '.join(skipped[:5])}")
-            logger.info(f"Tracking {len(self.positions)} tradable positions: {', '.join(list(self.positions.keys())[:5])}")
+                logger.info(f"Filtered {len(skipped)} non-tradable symbols")
+            logger.info(f"Tracking {len(self.positions)} tradable positions: {', '.join(list(self.positions.keys()))}")
             
-            # Build position rows for STATE/dashboard WITH EMA CALCULATIONS
+            # Build position rows for STATE/dashboard
+            # v15C FIX: Include the contract object!
             pos_rows = []
             for sym, p in self.positions.items():
                 try:
@@ -127,73 +123,6 @@ class TradeManager:
                     last = None
                 
                 # Calculate EMAs
-                ema8_val = None
-                ema21_val = None
-                try:
-                    closes = self.mdb.get_series(sym, 50)
-                    if len(closes) >= 21:
-                        ema8_val = ema(closes, 8)
-                        ema21_val = ema(closes, 21)
-                        # Convert nan to None for dashboard
-                        if ema8_val is not None and math.isnan(ema8_val):
-                            ema8_val = None
-                        if ema21_val is not None and math.isnan(ema21_val):
-                            ema21_val = None
-                except Exception as e:
-                    logger.debug(f"EMA calc failed for {sym}: {e}")
-                
-                # Adjust avg cost for futures (divide by multiplier for display)
-                avg_display = p["avg"]
-                if p["sec_type"] == "FUT" and p["multiplier"] > 1:
-                    avg_display = p["avg"] / p["multiplier"]
-                
-                pos_rows.append({
-                    "symbol": sym,
-                    "qty": p["qty"],
-                    "avg": avg_display,  # Display price (adjusted for futures)
-                    "last": last,
-                    "ema8": ema8_val,
-                    "ema21": ema21_val,
-                    "sec_type": p["sec_type"],
-                    "multiplier": p["multiplier"],
-                    "local_symbol": p["local_symbol"],
-                })
-            
-            STATE.positions_rows = pos_rows
-            
-            if rows:
-                logger.debug(f"Position sync complete: {len(rows)} positions")
-            
-        except Exception as e:
-            logger.warning(f"Position sync failed: {e}")
-
-    def heartbeat(self):
-        """
-        Main heartbeat loop - called every ~1s from main.py.
-        Handles periodic position syncs and price updates.
-        """
-        now = time.time()
-        
-        # Warmup period logic - resync every 10s for first minute
-        if now < self._warmup_end:
-            if now - self._last_pos_sync >= WARMUP_SYNC_INTERVAL:
-                logger.debug("Warmup: resyncing positions")
-                self._sync_positions()
-        # Normal operation - resync every 5 minutes
-        elif now - self._last_pos_sync >= POS_SYNC_SEC:
-            logger.info("Periodic position resync")
-            self._sync_positions()
-
-        # Quick price update for dashboard (with EMAs)
-        try:
-            out = []
-            for sym, p in self.positions.items():
-                try:
-                    last, _ = self.mdb.get_last(sym)
-                except Exception:
-                    last = None
-                
-                # Calculate EMAs on every heartbeat
                 ema8_val = None
                 ema21_val = None
                 try:
@@ -213,6 +142,67 @@ class TradeManager:
                 if p["sec_type"] == "FUT" and p["multiplier"] > 1:
                     avg_display = p["avg"] / p["multiplier"]
                 
+                pos_rows.append({
+                    "symbol": sym,
+                    "qty": p["qty"],
+                    "avg": avg_display,
+                    "last": last,
+                    "ema8": ema8_val,
+                    "ema21": ema21_val,
+                    "sec_type": p["sec_type"],
+                    "multiplier": p["multiplier"],
+                    "local_symbol": p["local_symbol"],
+                    "contract": p["contract"],  # v15C FIX: Include contract!
+                })
+            
+            STATE.positions_rows = pos_rows
+            
+            if rows:
+                logger.debug(f"Position sync complete: {len(rows)} positions")
+            
+        except Exception as e:
+            logger.warning(f"Position sync failed: {e}")
+
+    def heartbeat(self):
+        """Main heartbeat loop."""
+        now = time.time()
+        
+        # Warmup period logic
+        if now < self._warmup_end:
+            if now - self._last_pos_sync >= WARMUP_SYNC_INTERVAL:
+                logger.debug("Warmup: resyncing positions")
+                self._sync_positions()
+        elif now - self._last_pos_sync >= POS_SYNC_SEC:
+            logger.info("Periodic position resync")
+            self._sync_positions()
+
+        # Quick price update
+        try:
+            out = []
+            for sym, p in self.positions.items():
+                try:
+                    last, _ = self.mdb.get_last(sym)
+                except Exception:
+                    last = None
+                
+                ema8_val = None
+                ema21_val = None
+                try:
+                    closes = self.mdb.get_series(sym, 50)
+                    if len(closes) >= 21:
+                        ema8_val = ema(closes, 8)
+                        ema21_val = ema(closes, 21)
+                        if ema8_val is not None and math.isnan(ema8_val):
+                            ema8_val = None
+                        if ema21_val is not None and math.isnan(ema21_val):
+                            ema21_val = None
+                except Exception as e:
+                    logger.debug(f"EMA calc failed for {sym}: {e}")
+                
+                avg_display = p["avg"]
+                if p["sec_type"] == "FUT" and p["multiplier"] > 1:
+                    avg_display = p["avg"] / p["multiplier"]
+                
                 out.append({
                     "symbol": sym,
                     "qty": p["qty"],
@@ -223,6 +213,7 @@ class TradeManager:
                     "sec_type": p["sec_type"],
                     "multiplier": p["multiplier"],
                     "local_symbol": p["local_symbol"],
+                    "contract": p["contract"],  # v15C FIX: Include contract!
                 })
             
             if out:
@@ -232,7 +223,7 @@ class TradeManager:
             logger.debug(f"Heartbeat pricing update failed: {e}")
 
     def metrics(self) -> dict:
-        """Return current metrics for dashboard and logging."""
+        """Return current metrics."""
         subs = list(STATE.symbols_subscribed)
         return {
             "ib_connected": STATE.ib_connected,

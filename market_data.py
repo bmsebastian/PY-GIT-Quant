@@ -1,4 +1,4 @@
-# market_data.py - v15 (24/7 Extended Hours Support)
+# market_data.py - v15C (24/7 Extended Hours + Windows Compatible)
 """
 Enhanced market data with full 24/7 coverage:
 - Pre-market: 4:00 AM - 9:30 AM ET
@@ -6,7 +6,9 @@ Enhanced market data with full 24/7 coverage:
 - After-hours: 4:00 PM - 8:00 PM ET
 - Overnight/Weekend: Historical fallback
 
-All times converted automatically based on system timezone.
+v15C FIXES:
+- Remove unicode checkmarks for Windows compatibility
+- Ensure prices flow to STATE.prices correctly
 """
 
 import logging
@@ -103,10 +105,16 @@ class MarketDataBus:
         return time.time()
     
     def _record_tick(self, symbol: str, px: float, ts: float):
-        """Record a price tick."""
+        """Record a price tick and update STATE."""
         self.tickers[symbol] = {"last": px, "ts": ts}
         self.history[symbol].append(px)
+        
+        # CRITICAL: Update STATE.prices for dashboard
         STATE.mark_tick(symbol, px)
+        
+        # Also update STATE.prices dict directly for dashboard API
+        STATE.prices[symbol] = {'last': px, 'age': 0}
+        
         self._update_bar_data(symbol, px)
     
     def _update_bar_data(self, symbol: str, price: float):
@@ -226,6 +234,8 @@ class MarketDataBus:
         """
         Fetch historical data as fallback.
         Used when markets closed or no live data available.
+        
+        v15C FIX: Use the ACTUAL subscribed contract, not a new one!
         """
         if not HISTORICAL_FALLBACK_ENABLED:
             return
@@ -237,8 +247,11 @@ class MarketDataBus:
         if last_hist_ts and (now - last_hist_ts) < FALLBACK_COOLDOWN_SECONDS:
             return
         
-        contract, _ = self._subs.get(symbol, (None, None))
+        # CRITICAL FIX: Use the actual subscribed contract
+        # Don't create a new one - use the one with all fields populated
+        contract, ticker = self._subs.get(symbol, (None, None))
         if not contract:
+            logger.warning(f"No subscribed contract for {symbol}")
             return
         
         try:
@@ -249,9 +262,10 @@ class MarketDataBus:
             
             logger.info(f"Fetching historical for {symbol} {phase_str}")
             
-            # Request historical data
+            # Use the EXACT contract we're subscribed to
+            # This has all fields: conId, lastTradeDateOrContractMonth, etc.
             bars = self.ib.reqHistoricalData(
-                contract,
+                contract,  # This is the key - use the subscribed contract!
                 endDateTime="",
                 durationStr=HISTORICAL_DURATION,
                 barSizeSetting=HISTORICAL_BAR_SIZE,
@@ -268,14 +282,15 @@ class MarketDataBus:
                 ts = self._now()
                 self._record_tick(symbol, px, ts)
                 
+                # FIX: Remove unicode checkmark - use [OK] instead
                 logger.info(
-                    f"✓ Historical {symbol}: ${px:.2f} from {last_bar.date}"
+                    f"[OK] Historical {symbol}: ${px:.2f} from {last_bar.date}"
                 )
             else:
-                logger.warning(f"✗ No historical bars for {symbol}")
+                logger.warning(f"[WARN] No historical bars for {symbol}")
                 
         except Exception as e:
-            logger.warning(f"✗ Historical fetch failed for {symbol}: {e}")
+            logger.warning(f"[ERROR] Historical fetch failed for {symbol}: {e}")
     
     def get_last(self, symbol: str) -> Tuple[Optional[float], float]:
         """
@@ -310,6 +325,12 @@ class MarketDataBus:
         # Final nan check
         if px is not None and isinstance(px, float) and math.isnan(px):
             px = None
+        
+        # Update STATE.prices with age calculation
+        if symbol in self.tickers:
+            tick_ts = self.tickers[symbol].get('ts', ts)
+            age = int(self._now() - tick_ts) if tick_ts else 999
+            STATE.prices[symbol] = {'last': px, 'age': age}
         
         return px, ts
     

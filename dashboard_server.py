@@ -1,12 +1,15 @@
-# dashboard_server.py - v15 Multi-Asset Dashboard
+# dashboard_server.py - v15C Multi-Asset Dashboard (FIXED)
 """
 Professional 4-section dashboard:
 1. Positions - Open trades with live P&L
-2. Futures/Indexes - Watchlist real-time prices
+2. Futures/Indexes - Watchlist real-time prices  
 3. Unusual Options - Top 10 UOA
 4. Scanner Stocks - Top breakout opportunities
 
-White theme, 2-second refresh, extended hours support
+v15C FIXES:
+- Properly handle futures symbol mapping (NQ vs NQZ5)
+- Show live data for all subscribed symbols
+- Fix age calculation for stale detection
 """
 
 import logging
@@ -59,13 +62,15 @@ def api_status():
 
 @app.route('/api/positions')
 def api_positions():
-    """Positions with live P&L."""
+    """Positions with live P&L - includes ALL positions (stocks + futures)."""
     positions_list = []
     
     for symbol, pos in STATE.positions.items():
         try:
-            # Get latest price
+            # For futures (CLZ5, NQZ5), the symbol IS the key
+            # For stocks (TSLA, TOGI), same
             price_data = STATE.prices.get(symbol, {})
+            
             last = price_data.get('last')
             age = price_data.get('age', 999)
             
@@ -111,24 +116,39 @@ def api_positions():
 
 @app.route('/api/futures')
 def api_futures():
-    """Futures watchlist prices."""
+    """
+    Futures watchlist prices.
+    
+    v15C FIX: Handle futures symbol mapping
+    Futures may be subscribed as NQZ5, ESZ5, etc. but we want to display as NQ, ES.
+    """
     futures_list = []
     
-    for symbol in FUTURES_WATCHLIST:
+    for root_symbol in FUTURES_WATCHLIST:
         try:
-            price_data = STATE.prices.get(symbol, {})
+            # Try root symbol first (NQ, ES, etc.)
+            price_data = STATE.prices.get(root_symbol, {})
+            
+            # If not found, try to find any subscribed symbol starting with root
+            if not price_data or price_data.get('last') is None:
+                for subscribed_symbol in STATE.symbols_subscribed:
+                    if subscribed_symbol.startswith(root_symbol):
+                        price_data = STATE.prices.get(subscribed_symbol, {})
+                        if price_data.get('last') is not None:
+                            break
+            
             last = price_data.get('last')
             age = price_data.get('age', 999)
             
             futures_list.append({
-                'symbol': symbol,
+                'symbol': root_symbol,
                 'last': last,
                 'age': age,
-                'multiplier': FUTURES_MULTIPLIERS.get(symbol, 1)
+                'multiplier': FUTURES_MULTIPLIERS.get(root_symbol, 1)
             })
             
         except Exception as e:
-            logger.error(f"Futures API error for {symbol}: {e}")
+            logger.error(f"Futures API error for {root_symbol}: {e}")
             continue
     
     return jsonify({
@@ -560,7 +580,8 @@ DASHBOARD_HTML = """
                     // Uptime
                     const uptime = document.getElementById('uptime');
                     uptime.textContent = formatUptime(data.uptime);
-                });
+                })
+                .catch(err => console.error('Status fetch error:', err));
         }
         
         function updatePositions() {
@@ -600,7 +621,8 @@ DASHBOARD_HTML = """
                     // Update total P&L
                     totalPnlEl.textContent = formatCurrency(data.total_pnl);
                     totalPnlEl.style.color = data.total_pnl >= 0 ? '#22c55e' : '#ef4444';
-                });
+                })
+                .catch(err => console.error('Positions fetch error:', err));
         }
         
         function updateFutures() {
@@ -627,7 +649,8 @@ DASHBOARD_HTML = """
                     });
                     
                     tbody.innerHTML = rows.join('');
-                });
+                })
+                .catch(err => console.error('Futures fetch error:', err));
         }
         
         function updateScanner() {
@@ -661,7 +684,8 @@ DASHBOARD_HTML = """
                     });
                     
                     tbody.innerHTML = rows.join('');
-                });
+                })
+                .catch(err => console.error('Scanner fetch error:', err));
         }
         
         function updateOptions() {
@@ -694,7 +718,8 @@ DASHBOARD_HTML = """
                     });
                     
                     tbody.innerHTML = rows.join('');
-                });
+                })
+                .catch(err => console.error('Options fetch error:', err));
         }
         
         function updateAll() {

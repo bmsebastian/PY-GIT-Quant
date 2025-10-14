@@ -1,4 +1,4 @@
-# config.py - QTrade v15 COMPLETE Configuration
+# config.py - QTrade v15C Configuration (Clean)
 """
 Complete configuration for QTrade v15 with full backward compatibility.
 Includes all v14 constants + v15 enhancements.
@@ -98,9 +98,9 @@ SCANNER_MAX_PRICE = 1000.0       # $1000 maximum (avoid AMZN/GOOG issues)
 SCANNER_MIN_VOLUME = 500000      # 500K daily volume minimum
 SCANNER_MIN_DOLLAR_VOLUME = 5_000_000  # $5M daily $ volume
 
-# Scoring thresholds (0-100 scale)
-SCANNER_MIN_SCORE = 60.0         # 60+ to qualify
-SCANNER_EXCELLENT_SCORE = 80.0   # 80+ = exceptional
+# Scoring thresholds (0-100 scale) - v15C LOWERED FOR TESTING
+SCANNER_MIN_SCORE = 40.0         # 40+ to qualify (was 60)
+SCANNER_EXCELLENT_SCORE = 70.0   # 70+ = excellent (was 80)
 
 # Relative Strength scoring (25 points max)
 RS_BENCHMARK = 'SPY'             # Compare against S&P 500
