@@ -1,112 +1,269 @@
-
-# main.py — QTrade v14
-import os
-import time
+#!/usr/bin/env python3
+# main.py - QTrade v15 with professional multi-asset system
 import logging
-from time import monotonic
-from datetime import datetime
+import sys
+import time
+import signal
+from datetime import datetime, UTC
+from typing import Set
 
 from config import (
     ENV, DRY_RUN, HEARTBEAT_SEC,
-    DASHBOARD_HOST, DASHBOARD_PORT
+    DASHBOARD_HOST, DASHBOARD_PORT,
+    LOG_LEVEL,
+    IB_MAX_SUBSCRIPTIONS,
+    SCANNER_MAX_WARN_THRESHOLD,
 )
+from state_bus import STATE
 from trade_manager import TradeManager
-from dashboard_server import start_dashboard
-from state_bus import STATE  # Singleton state store used by dashboard
+from dashboard_server import run_dashboard
+from scanner_coordinator import SubscriptionManager
+import threading
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# Logging setup
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("qtrade.log")
+    ]
+)
+logger = logging.getLogger(__name__)
 
-HB_EVERY_SEC = 60  # emit heartbeat once per minute
+# Globals
+tm: TradeManager = None
+subscription_manager: SubscriptionManager = None
+running = True
 
-def format_hhmmss(seconds: int) -> str:
-    seconds = max(0, int(seconds))
-    h, r = divmod(seconds, 3600)
-    m, s = divmod(r, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
+def signal_handler(sig, frame):
+    """Handle Ctrl+C gracefully."""
+    global running
+    logger.info("Shutdown signal received...")
+    running = False
+
+def get_position_symbols(ib) -> Set[str]:
+    """Get current position symbols from IB (excluding non-tradable)."""
+    position_symbols = set()
+    
+    # Non-tradable filters
+    filters = ['Q', 'W', '.CVR', '.OLD', '.WS', 'REF']
+    
+    try:
+        positions = ib.positions()
+        for pos in positions:
+            if pos.position != 0:  # Active position
+                # Handle both stocks and futures
+                symbol = pos.contract.localSymbol or pos.contract.symbol
+                if symbol:
+                    symbol_upper = symbol.upper()
+                    
+                    # Skip non-tradable symbols (but allow futures)
+                    sec_type = pos.contract.secType
+                    skip = False
+                    
+                    if sec_type != 'FUT':  # Don't filter futures
+                        for filt in filters:
+                            if filt in symbol_upper:
+                                skip = True
+                                break
+                    
+                    if not skip:
+                        position_symbols.add(symbol_upper)
+                        
+    except Exception as e:
+        logger.error(f"Error getting positions: {e}")
+    
+    return position_symbols
+
+def start_dashboard_thread():
+    """Start dashboard in background thread."""
+    dashboard_thread = threading.Thread(
+        target=run_dashboard,
+        daemon=True,
+        name="DashboardThread"
+    )
+    dashboard_thread.start()
+    logger.info(f"Dashboard started at http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
 
 def main():
-    logging.info(f"Booting QTrade v14 ENV={ENV} DRY_RUN={DRY_RUN}")
-    start_dashboard(DASHBOARD_HOST, DASHBOARD_PORT)
-    logging.info(f"Dashboard at http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
-
+    global tm, subscription_manager, running
+    
+    logger.info("=" * 60)
+    logger.info(f"QTrade v15 Professional Multi-Asset System")
+    logger.info(f"ENV={ENV} | DRY_RUN={DRY_RUN}")
+    logger.info(f"Dashboard: http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
+    logger.info(f"Subscription limit: {IB_MAX_SUBSCRIPTIONS}")
+    logger.info("=" * 60)
+    
+    # Signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Initialize TradeManager
+    logger.info("Initializing TradeManager...")
     tm = TradeManager(dry_run=bool(DRY_RUN))
-    tm.start()
-
-    loop_period = max(0.5, float(HEARTBEAT_SEC))
-    t0_wall = time.time()
-    last_hb_mono = monotonic() - HB_EVERY_SEC
-    hb_seq = 0
-
+    
     try:
-        while True:
-            loop_start = monotonic()
-            tm.heartbeat()
-
-            metrics = tm.metrics()
-            STATE.update(
-                env=ENV,
-                dry_run=bool(DRY_RUN),
-                ib_connected=metrics.get("ib_connected", False),
-                pnl_today=metrics.get("pnl_today", 0.0),
-                open_orders=metrics.get("open_orders", 0),
-                positions=metrics.get("positions", []),
-                prices=metrics.get("prices", {}),
-                ema8=metrics.get("ema8", {}),
-                ema21=metrics.get("ema21", {}),
-                subs_symbols=set(metrics.get("subscriptions", []))
-            )
-
-            now_mono = monotonic()
-            if now_mono - last_hb_mono >= HB_EVERY_SEC:
-                last_hb_mono = now_mono
+        tm.start()
+        logger.info("✓ TradeManager started")
+    except Exception as e:
+        logger.exception("✗ TradeManager failed to start")
+        sys.exit(1)
+    
+    # Start dashboard in background thread
+    try:
+        start_dashboard_thread()
+        time.sleep(1)  # Give dashboard a moment to start
+        logger.info("✓ Dashboard started")
+    except Exception as e:
+        logger.warning(f"Dashboard failed to start: {e}")
+    
+    # Initialize Subscription Manager (v15 scanner coordinator)
+    logger.info("Initializing v15 Subscription Manager...")
+    try:
+        subscription_manager = SubscriptionManager(
+            ib=tm.ib,
+            market_bus=tm.mdb
+        )
+        subscription_manager.start()
+        logger.info("✓ Subscription Manager started")
+        logger.info("  - Professional breakout scanner active")
+        logger.info("  - Unusual options scanner active")
+        logger.info("  - Smart 50-subscription management active")
+    except Exception as e:
+        logger.warning(f"Subscription Manager initialization failed: {e}")
+        subscription_manager = None
+    
+    # Update market phase in STATE
+    try:
+        phase_info = tm.mdb.get_market_phase()
+        STATE.market_phase = phase_info['phase']
+        logger.info(f"Market phase: {phase_info['phase']} (tradable: {phase_info['is_tradable']})")
+    except Exception as e:
+        logger.warning(f"Could not determine market phase: {e}")
+    
+    # Main loop
+    logger.info("=" * 60)
+    logger.info("Main loop starting...")
+    logger.info("=" * 60)
+    
+    hb_seq = 0
+    started_at = time.time()
+    last_hb_emit = 0
+    HB_EMIT_INTERVAL = 60  # Emit heartbeat log every 60s
+    
+    try:
+        while running:
+            loop_start = time.time()
+            
+            # Get current positions for tracking
+            position_symbols = get_position_symbols(tm.ib)
+            
+            # TradeManager heartbeat
+            try:
+                tm.heartbeat()
+            except Exception as e:
+                logger.warning(f"TradeManager heartbeat failed: {e}")
+            
+            # Update market phase periodically
+            try:
+                phase_info = tm.mdb.get_market_phase()
+                STATE.market_phase = phase_info['phase']
+            except Exception as e:
+                pass  # Don't spam logs
+            
+            # Emit heartbeat log periodically
+            now = time.time()
+            if now - last_hb_emit >= HB_EMIT_INTERVAL:
                 hb_seq += 1
-                uptime_s = int(time.time() - t0_wall)
-
-                last_tick_at = metrics.get("last_tick_at")
-                last_pos_sync_at = metrics.get("last_pos_sync_at")
-
-                last_tick_age = None if not last_tick_at else max(0, int(time.time() - last_tick_at))
-                last_pos_age = None if not last_pos_sync_at else max(0, int(time.time() - last_pos_sync_at))
-
-                loop_lag_ms = int((monotonic() - loop_start) * 1000)
-
+                uptime = int(now - started_at)
+                
+                # Calculate ages
+                tick_age = int(now - STATE.last_tick_at) if STATE.last_tick_at else None
+                pos_age = int(now - STATE.last_pos_sync_at) if STATE.last_pos_sync_at else None
+                
+                # Get subscription stats
+                if subscription_manager:
+                    status = subscription_manager.get_status()
+                    sub_count = status['total']
+                    sub_breakdown = f"pos={status['positions']} fut={status['futures']} opt={status['options']} scan={status['scanner']}"
+                else:
+                    sub_count = len(tm.mdb._subs)
+                    sub_breakdown = "legacy"
+                
+                # Update heartbeat in STATE
                 STATE.update_heartbeat(
                     seq=hb_seq,
-                    ts=datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                    uptime_s=uptime_s,
-                    last_tick_age_s=last_tick_age,
-                    last_pos_sync_age_s=last_pos_age,
-                    subs=len(metrics.get("subscriptions", [])),
-                    prices=len(metrics.get("prices", {})),
-                    ib_connected=metrics.get("ib_connected", False),
-                    live_mode=(not bool(DRY_RUN)),
-                    dry_run=bool(DRY_RUN),
-                    loop_lag_ms=loop_lag_ms,
+                    ts=datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                    uptime_s=uptime,
+                    last_tick_age_s=tick_age,
+                    last_pos_sync_age_s=pos_age,
+                    subs=sub_count,
+                    ib_connected=STATE.ib_connected,
+                    live_mode=STATE.live_mode,
+                    dry_run=STATE.dry_run,
+                    loop_lag_ms=STATE.loop_lag_ms,
+                    prices=len(STATE.prices)
                 )
-                logging.info(
-                    "HB #%s | up=%s | subs=%d | prices=%d | tick_age=%ss | pos_age=%ss | ib=%s | live=%s | lag=%dms",
-                    hb_seq, format_hhmmss(uptime_s),
-                    len(metrics.get("subscriptions", [])),
-                    len(metrics.get("prices", {})),
-                    "-" if last_tick_age is None else last_tick_age,
-                    "-" if last_pos_age is None else last_pos_age,
-                    metrics.get("ib_connected", False),
-                    not bool(DRY_RUN),
-                    loop_lag_ms,
+                
+                # Get scanner stats
+                scanner_stats = ""
+                if subscription_manager:
+                    scanner_results = getattr(STATE, 'scanner_results', [])
+                    options_results = getattr(STATE, 'unusual_options', [])
+                    scanner_stats = f" | scanner={len(scanner_results)} opt={len(options_results)}"
+                
+                # Build subscription status indicator
+                if sub_count > IB_MAX_SUBSCRIPTIONS:
+                    sub_status = "[OVER!]"
+                elif sub_count >= SCANNER_MAX_WARN_THRESHOLD:
+                    sub_status = "[NEAR]"
+                else:
+                    sub_status = "[OK]"
+                
+                # Get market phase
+                market_phase = getattr(STATE, 'market_phase', 'unknown')
+                
+                logger.info(
+                    f"HB #{hb_seq} | up={uptime//3600:02d}:{(uptime%3600)//60:02d}:{uptime%60:02d} | "
+                    f"phase={market_phase} | "
+                    f"subs={sub_count}/{IB_MAX_SUBSCRIPTIONS} {sub_status} ({sub_breakdown}) | "
+                    f"pos={len(position_symbols)} | "
+                    f"prices={len(STATE.prices)} | "
+                    f"tick_age={tick_age}s | pos_age={pos_age}s | "
+                    f"ib={STATE.ib_connected} | "
+                    f"lag={STATE.loop_lag_ms}ms{scanner_stats}"
                 )
-
-            # loop pacing
-            sleep_left = loop_period - (monotonic() - loop_start)
-            if sleep_left > 0:
-                time.sleep(sleep_left)
-
+                
+                last_hb_emit = now
+            
+            # Calculate loop lag
+            loop_elapsed = time.time() - loop_start
+            STATE.loop_lag_ms = int(loop_elapsed * 1000)
+            
+            # Sleep to maintain interval
+            sleep_time = max(0, HEARTBEAT_SEC - loop_elapsed)
+            time.sleep(sleep_time)
+            
     except KeyboardInterrupt:
-        logging.warning("Shutting down (Ctrl-C)")
+        logger.info("Keyboard interrupt received")
+    except Exception as e:
+        logger.exception("Main loop crashed")
     finally:
-        try:
+        logger.info("=" * 60)
+        logger.info("Shutting down...")
+        logger.info("=" * 60)
+        
+        if subscription_manager:
+            subscription_manager.stop()
+            logger.info("✓ Subscription Manager stopped")
+        
+        if tm:
             tm.stop()
-        except Exception as e:
-            logging.error("TradeManager stop error: %s", e)
+            logger.info("✓ TradeManager stopped")
+        
+        logger.info("Shutdown complete")
 
 if __name__ == "__main__":
     main()

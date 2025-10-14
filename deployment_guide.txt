@@ -1,0 +1,337 @@
+============================================================
+  QTRADE v14A - CRITICAL FIXES DEPLOYMENT GUIDE
+============================================================
+
+DATE: 2025-01-12
+STATUS: READY FOR DEPLOYMENT
+
+============================================================
+WHAT WAS FIXED
+============================================================
+
+1. ✅ BREAKOUT SCANNER - Capacity Management
+   - Replaced basic scanner with capacity-aware version
+   - Now respects 50-subscription IB limit
+   - Auto-limits scanner symbols based on position count
+
+2. ✅ MARKET SCANNER - Subscription Safety
+   - Added capacity checks before subscribing
+   - Prevents exceeding IB subscription limit
+   - Proper error handling and logging
+
+3. ✅ TRADE MANAGER - Priority Subscriptions
+   - Position subscriptions now use PRIORITY_POSITION (100)
+   - Ensures positions are never removed during cleanup
+   - Updates existing subscriptions to position priority
+
+4. ✅ MARKET DATA - Safer Tick Handling
+   - Protected marketPrice() and midpoint() calls with try/except
+   - Prevents crashes from NaN values
+   - Better logging for debugging
+
+5. ✅ DASHBOARD - White Theme + Consistency
+   - Changed from dark to clean white background
+   - Improved readability and professional look
+   - Fixed position filtering consistency
+
+6. ✅ README - Updated Documentation
+   - Now reflects v14A (was v13.5)
+   - Added subscription management docs
+   - Comprehensive troubleshooting guide
+
+============================================================
+FILES TO REPLACE
+============================================================
+
+CRITICAL (Must replace immediately):
+┌─────────────────────────────────────────────────────────┐
+│ 1. strategies/breakout_scanner.py                      │
+│    → Download artifact: "breakout_scanner.py (FIXED)"  │
+│                                                         │
+│ 2. scanner.py                                           │
+│    → Download artifact: "scanner.py (FIXED)"           │
+│                                                         │
+│ 3. trade_manager.py                                     │
+│    → Download artifact: "trade_manager.py (FIXED)"     │
+│                                                         │
+│ 4. market_data.py                                       │
+│    → Download artifact: "market_data.py (FIXED)"       │
+│                                                         │
+│ 5. dashboard_server.py                                  │
+│    → Download artifact: "dashboard_server.py (WHITE)"  │
+└─────────────────────────────────────────────────────────┘
+
+RECOMMENDED (Update documentation):
+┌─────────────────────────────────────────────────────────┐
+│ 6. README.md                                            │
+│    → Download artifact: "README.md (v14A - UPDATED)"   │
+└─────────────────────────────────────────────────────────┘
+
+============================================================
+STEP-BY-STEP DEPLOYMENT
+============================================================
+
+Step 1: BACKUP YOUR CURRENT CODE
+---------------------------------
+IMPORTANT: Make a backup first!
+
+Windows:
+  xcopy /E /I /Y qtrade qtrade_backup_before_v14a
+  
+macOS/Linux:
+  cp -r qtrade qtrade_backup_before_v14a
+
+Step 2: DOWNLOAD FIXED FILES
+-----------------------------
+1. Open the artifacts in Claude (they're on the left side)
+2. Click each artifact
+3. Click the download button (⬇️ icon)
+4. Save to your qtrade directory
+
+Files to download:
+  □ breakout_scanner.py (FIXED)
+  □ scanner.py (FIXED)
+  □ trade_manager.py (FIXED)
+  □ market_data.py (FIXED)
+  □ dashboard_server.py (WHITE THEME - FIXED)
+  □ README.md (v14A - UPDATED)
+
+Step 3: REPLACE FILES
+----------------------
+Copy downloaded files to correct locations:
+
+  breakout_scanner.py → strategies/breakout_scanner.py
+  scanner.py → scanner.py
+  trade_manager.py → trade_manager.py
+  market_data.py → market_data.py
+  dashboard_server.py → dashboard_server.py
+  README.md → README.md
+
+Step 4: VERIFY REPLACEMENTS
+----------------------------
+Check file dates/sizes to confirm replacement:
+
+Windows:
+  dir strategies\breakout_scanner.py
+  dir scanner.py
+  dir trade_manager.py
+  dir market_data.py
+  dir dashboard_server.py
+
+macOS/Linux:
+  ls -lh strategies/breakout_scanner.py
+  ls -lh scanner.py
+  ls -lh trade_manager.py
+  ls -lh market_data.py
+  ls -lh dashboard_server.py
+
+Step 5: TEST IN PAPER TRADING
+------------------------------
+1. Ensure TWS/Gateway is running (port 7497)
+2. Start QTrade:
+     python main.py
+
+3. Watch for these logs:
+   ✓ "BreakoutScanner universe updated" (with capacity info)
+   ✓ "Subscribed LIVE XXX (priority=100)" for positions
+   ✓ "MarketScanner starting: capacity=..."
+   ✓ "Dashboard started on http://127.0.0.1:8052"
+
+4. Open dashboard: http://localhost:8052
+   ✓ Should have WHITE background (not dark)
+   ✓ Subscription gauge should show proper counts
+   ✓ Positions should display with EMA values
+
+Step 6: MONITOR FOR ISSUES
+---------------------------
+Watch logs for:
+
+✓ GOOD:
+  - "Subscribed LIVE XXX (priority=100)" for positions
+  - "Scanner wants N symbols but capacity is M. Limiting..."
+  - Subscription count stays under 50
+
+✗ BAD:
+  - "ERROR: SUBSCRIPTION OVER LIMIT"
+  - "Failed to subscribe" errors
+  - NaN values in dashboard
+
+Step 7: COMMIT CHANGES (Optional)
+----------------------------------
+If using git:
+
+  git add .
+  git commit -m "fix(v14a): critical subscription and dashboard fixes
+
+  - Replace basic scanner with capacity-aware version
+  - Add subscription limit checks in market scanner
+  - Add position priority in trade manager
+  - Safer tick handling in market data
+  - White theme dashboard
+  - Update docs to v14A"
+
+  git tag v14a-fixed
+  git push origin main --tags
+
+============================================================
+ROLLBACK PROCEDURE (If needed)
+============================================================
+
+If something breaks:
+
+1. Stop QTrade (Ctrl+C)
+
+2. Restore backup:
+   Windows:
+     xcopy /E /I /Y qtrade_backup_before_v14a qtrade
+   
+   macOS/Linux:
+     rm -rf qtrade
+     cp -r qtrade_backup_before_v14a qtrade
+
+3. Restart with old code:
+     python main.py
+
+4. Report issue with logs:
+     tail -100 qtrade.log
+
+============================================================
+VERIFICATION CHECKLIST
+============================================================
+
+After deployment, verify these features work:
+
+□ IB Connection
+  - Check dashboard shows "IB: Connected" (green dot)
+  - Verify positions load correctly
+  - Confirm market data updates
+
+□ Subscription Management
+  - Dashboard shows correct subscription count
+  - Gauge displays proper capacity calculation
+  - No "OVER LIMIT" errors in logs
+
+□ Position Scanner
+  - Positions appear in scanner universe
+  - EMAs calculate correctly
+  - Position symbols never removed from subscriptions
+
+□ Market Scanner
+  - Scans run every 60 seconds
+  - New symbols subscribe with capacity check
+  - Breakout signals appear in dashboard
+
+□ Dashboard
+  - WHITE background (not dark)
+  - All tables render correctly
+  - Real-time updates every 2 seconds
+  - P&L calculations accurate
+
+□ Risk Controls
+  - Non-tradable symbols filtered (CVR, OTC, etc.)
+  - Circuit breaker logic intact
+  - Order limits enforced
+
+============================================================
+KNOWN ISSUES & WORKAROUNDS
+============================================================
+
+Issue: "No changes to commit" when running auto_commit
+Workaround: Normal if files already committed. Use manual git.
+
+Issue: Dashboard shows "-" for EMA values
+Cause: Insufficient price history (need 21+ bars)
+Solution: Wait ~5 minutes for data to accumulate
+
+Issue: Weekend mode - no live prices
+Expected: System uses historical fallback automatically
+Check logs: Should see "Weekend detected" message
+
+Issue: Subscription count slightly over 50
+Solution: Auto-cleanup runs every 60s. Wait for next cycle.
+
+============================================================
+SUPPORT & TROUBLESHOOTING
+============================================================
+
+Log Analysis:
+  # Show errors only
+  grep ERROR qtrade.log
+  
+  # Show subscription activity
+  grep "Subscribed\|Unsubscribed" qtrade.log
+  
+  # Show capacity warnings
+  grep "OVER LIMIT\|NEAR LIMIT" qtrade.log
+
+Common Fixes:
+  1. Restart TWS/Gateway if "Not connected" error
+  2. Check port 7497 (paper) vs 7496 (live)
+  3. Verify IB API settings enabled
+  4. Clear qtrade.log if too large (>100MB)
+
+Need Help?
+  - Check README.md troubleshooting section
+  - Review logs in qtrade.log
+  - Verify all 6 files were replaced correctly
+
+============================================================
+SUCCESS CRITERIA
+============================================================
+
+Deployment is successful when:
+
+✓ System starts without errors
+✓ Dashboard loads with white background
+✓ Positions display correctly
+✓ Subscription count stays ≤ 50
+✓ No "OVER LIMIT" errors in first 10 minutes
+✓ Scanner finds opportunities (if market conditions allow)
+✓ EMAs calculate for positions with sufficient data
+
+============================================================
+POST-DEPLOYMENT MONITORING
+============================================================
+
+Monitor for 24 hours:
+  
+  Hour 1: Watch for immediate errors
+  Hour 4: Verify subscription stability
+  Hour 24: Confirm long-term operation
+
+Key Metrics:
+  - Uptime (should be continuous)
+  - Subscription count (should stay < 50)
+  - Position sync (every 5 minutes)
+  - Scanner signals (market dependent)
+
+============================================================
+NEXT STEPS (Future Enhancements)
+============================================================
+
+After stable operation, consider:
+
+□ Add unit tests (pytest)
+□ Implement subscription TTL (reduce churn)
+□ Centralize bar data tracking
+□ Add alerting (email/Slack)
+□ Create Docker deployment
+□ Add automated testing suite
+
+============================================================
+QUESTIONS?
+============================================================
+
+If you encounter issues:
+1. Check this guide's troubleshooting section
+2. Review qtrade.log for errors
+3. Verify all files were replaced correctly
+4. Try rollback procedure if needed
+
+============================================================
+END OF DEPLOYMENT GUIDE
+============================================================
+
+Good luck! 🚀
+
+Last updated: 2025-01-12

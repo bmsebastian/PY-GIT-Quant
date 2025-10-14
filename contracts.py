@@ -1,80 +1,186 @@
-# contracts.py
-import re
+# contracts.py - Contract helper functions
+"""
+Helper functions for identifying and filtering contracts.
+"""
+
 import logging
-from typing import Optional
+
 logger = logging.getLogger(__name__)
 
-# Futures root → exchange map (expand as needed)
-FUTURES_MAP = {
-    "ES": ("CME",  "E-mini S&P 500"),
-    "NQ": ("CME",  "E-mini NASDAQ-100"),
-    "RTY":("CME",  "E-mini Russell 2000"),
-    "YM": ("CBOT", "E-mini Dow"),
-    "CL": ("NYMEX","Crude Oil"),
-    "GC": ("COMEX","Gold"),
-}
+# Non-tradable symbol patterns
+NON_TRADABLE_PATTERNS = [
+    'Q',      # Bankruptcy/delisted (but NOT futures like NQZ5)
+    'W',      # Warrants
+    '.CVR',   # Contingent Value Rights
+    '.OLD',   # Old/delisted
+    '.WS',    # Warrants
+    'REF',    # Reference symbols
+]
 
-def looks_nontradable_symbol(sym: str) -> bool:
-    s = sym.upper()
-    # Common non-tradable/equity-like junk we should skip from auto-subscription
-    if ".CVR" in s or ".OLD" in s or ".RIGHT" in s or ".WT" in s:
+def looks_nontradable_symbol(symbol: str) -> bool:
+    """
+    Check if a symbol looks non-tradable (OTC, delisted, CVR, etc).
+    
+    Args:
+        symbol: Stock symbol to check
+        
+    Returns:
+        True if symbol appears non-tradable
+        
+    Examples:
+        >>> looks_nontradable_symbol("AAPL")
+        False
+        >>> looks_nontradable_symbol("TOGI")  # OTC
+        False  # Would need more context
+        >>> looks_nontradable_symbol("ALPSQ")  # Bankruptcy
+        True
+        >>> looks_nontradable_symbol("NQZ5")  # Futures
+        False
+    """
+    if not symbol:
         return True
-    # Anything with a dot is often an OTC local symbol variant we can’t SMART-qualify
-    if "." in s:
-        return True
+    
+    symbol_upper = symbol.upper()
+    
+    # Check for explicit non-tradable patterns
+    for pattern in NON_TRADABLE_PATTERNS:
+        if pattern in symbol_upper:
+            # Special case: 'Q' in symbol
+            # Allow futures (NQZ5, QQQ, etc) but block bankruptcy (ALPSQ, etc)
+            if pattern == 'Q':
+                # If Q is at the end and preceded by letters, likely bankruptcy
+                if symbol_upper.endswith('Q') and len(symbol_upper) > 3:
+                    # But allow QQQ, NQ, etc
+                    if symbol_upper not in ['QQQ', 'NQ', 'NQH', 'NQM', 'NQU', 'NQZ']:
+                        # Check if it's a futures code (e.g., NQZ5, ESH5)
+                        if not (len(symbol_upper) >= 3 and symbol_upper[-1].isdigit()):
+                            return True
+            else:
+                return True
+    
     return False
 
-def is_futures_root(sym: str) -> bool:
-    return sym.upper() in FUTURES_MAP
 
-def qualify_stock(ib, symbol: str):
-    from ib_insync import Stock
-    c = Stock(symbol, exchange="SMART", currency="USD")
-    q = ib.qualifyContracts(c)
-    return q[0] if q else None
+def is_futures_symbol(symbol: str) -> bool:
+    """
+    Check if symbol appears to be a futures contract.
+    
+    Args:
+        symbol: Symbol to check
+        
+    Returns:
+        True if appears to be futures
+        
+    Examples:
+        >>> is_futures_symbol("NQZ5")
+        True
+        >>> is_futures_symbol("ESH25")
+        True
+        >>> is_futures_symbol("AAPL")
+        False
+    """
+    if not symbol:
+        return False
+    
+    symbol_upper = symbol.upper()
+    
+    # Common futures root symbols
+    futures_roots = ['NQ', 'ES', 'CL', 'GC', 'ZB', 'RTY', 'YM', 'SI', 'HG']
+    
+    for root in futures_roots:
+        if symbol_upper.startswith(root):
+            # Check if followed by month code + year
+            if len(symbol_upper) > len(root):
+                return True
+    
+    # General pattern: letters + month code + year digit(s)
+    # Example: NQZ5, ESH25, CLM24
+    if len(symbol_upper) >= 4:
+        # Last char should be digit (year)
+        if symbol_upper[-1].isdigit():
+            # Second to last should be letter (month code)
+            if symbol_upper[-2].isalpha():
+                return True
+    
+    return False
 
-def qualify_nearest_future(ib, root: str):
-    """
-    Pick the nearest active future for a root like CL, NQ, ES.
-    """
-    from ib_insync import Future, util
-    exch, _desc = FUTURES_MAP[root.upper()]
-    cd_list = ib.reqContractDetails(Future(symbol=root.upper(), exchange=exch))
-    if not cd_list:
-        return None
-    # Choose the soonest non-expired monthly/weekly
-    cd_list.sort(key=lambda cd: cd.contract.lastTradeDateOrContractMonth or "9999")
-    return cd_list[0].contract
 
-def build_and_qualify(ib, sym: str):
+def get_contract_type(contract) -> str:
     """
-    Returns a qualified Contract or None if not tradable.
+    Get contract security type.
+    
+    Args:
+        contract: IB contract object
+        
+    Returns:
+        Security type string: 'STK', 'FUT', 'OPT', 'FOP', 'CASH', etc.
     """
-    if looks_nontradable_symbol(sym):
-        logger.info(f"Skip {sym}: looks non-tradable (CVR/OLD/OTC variant)")
-        return None
+    if not contract:
+        return 'UNKNOWN'
+    
+    sec_type = getattr(contract, 'secType', None)
+    if sec_type:
+        return str(sec_type)
+    
+    return 'UNKNOWN'
 
-    # Futures roots
-    if is_futures_root(sym):
+
+def format_contract_symbol(contract) -> str:
+    """
+    Format contract symbol for display.
+    Prefers localSymbol for futures, symbol for stocks.
+    
+    Args:
+        contract: IB contract object
+        
+    Returns:
+        Formatted symbol string
+    """
+    if not contract:
+        return "?"
+    
+    sec_type = get_contract_type(contract)
+    
+    if sec_type == 'FUT':
+        # Use localSymbol for futures (e.g., NQZ5)
+        return getattr(contract, 'localSymbol', None) or getattr(contract, 'symbol', '?')
+    else:
+        # Use symbol for stocks
+        return getattr(contract, 'symbol', None) or getattr(contract, 'localSymbol', '?')
+
+
+def get_contract_multiplier(contract) -> float:
+    """
+    Get contract multiplier.
+    
+    Args:
+        contract: IB contract object
+        
+    Returns:
+        Multiplier as float (1.0 for stocks, varies for futures/options)
+    """
+    if not contract:
+        return 1.0
+    
+    multiplier = getattr(contract, 'multiplier', None)
+    
+    if multiplier:
         try:
-            c = qualify_nearest_future(ib, sym)
-            if c:
-                logger.info(f"Qualified FUT {sym} -> {c.localSymbol} @ {c.exchange}")
-            return c
-        except Exception:
-            logger.exception(f"Futures qualify failed for {sym}")
-            return None
-
-    # Default: equity
-    try:
-        c = qualify_stock(ib, sym)
-        if c:
-            # Exclude OTC/PINK by default
-            ex = (getattr(c, "primaryExchange", "") or "").upper()
-            if ex in {"PINK", "OTC", "OTCBB"}:
-                logger.info(f"Skip {sym}: primaryExchange={ex}")
-                return None
-            return c
-    except Exception:
-        logger.exception(f"Stock qualify failed for {sym}")
-    return None
+            return float(multiplier)
+        except (ValueError, TypeError):
+            pass
+    
+    # Default multipliers by type
+    sec_type = get_contract_type(contract)
+    
+    if sec_type == 'STK':
+        return 1.0
+    elif sec_type == 'FUT':
+        # Try to infer from symbol
+        symbol = getattr(contract, 'symbol', '')
+        from config import FUTURES_MULTIPLIERS
+        return FUTURES_MULTIPLIERS.get(symbol, 1.0)
+    elif sec_type == 'OPT':
+        return 100.0  # Standard option contract
+    
+    return 1.0
