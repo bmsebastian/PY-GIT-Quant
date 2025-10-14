@@ -1,4 +1,4 @@
-# trade_manager.py — v14A with priority subscriptions and EMA calculations (FIXED)
+# trade_manager.py — v15B with proper position data handling
 import logging, time, math
 from typing import Dict, List, Tuple
 from state_bus import STATE
@@ -16,10 +16,10 @@ WARMUP_SYNC_INTERVAL = 10  # Sync every 10s during warmup
 class TradeManager:
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
-        self.ibc = IBClient()          # wrapper
-        self.ib = None                 # ib_insync.IB handle
+        self.ibc = IBClient()
+        self.ib = None
         self.mdb: MarketDataBus = None
-        self.positions: Dict[str, Dict] = {}  # sym -> {qty, avg, contract}
+        self.positions: Dict[str, Dict] = {}
         self._last_pos_sync = 0.0
         self._warmup_end = 0.0
 
@@ -52,8 +52,7 @@ class TradeManager:
         logger.info("TradeManager stopping...")
         try:
             if self.mdb:
-                # Clean up subscriptions
-                pass
+                pass  # Cleanup subscriptions if needed
             
             self.ibc.disconnect()
             STATE.ib_connected = False
@@ -63,12 +62,12 @@ class TradeManager:
 
     def _sync_positions(self, initial: bool = False):
         """
-        Sync positions from IB and update subscriptions with PRIORITY.
+        Sync positions from IB and update subscriptions.
         
         Args:
             initial: If True, this is the first sync on startup
         """
-        from contracts import looks_nontradable_symbol
+        from contracts import looks_nontradable_symbol, get_contract_multiplier
         
         try:
             rows = self.ibc.fetch_positions()
@@ -88,27 +87,27 @@ class TradeManager:
                     logger.info(f"Skipping non-tradable: {sym}")
                     continue
                 
+                # Get multiplier for proper P&L calculation
+                multiplier = get_contract_multiplier(r["contract"])
+                
+                # Store position data with v15 fields
                 self.positions[sym] = {
                     "qty": r["qty"],
                     "avg": r["avgCost"],
-                    "contract": r["contract"]
+                    "contract": r["contract"],
+                    "sec_type": r.get("sec_type", "STK"),
+                    "local_symbol": r.get("local_symbol", sym),
+                    "multiplier": multiplier,
                 }
                 new_syms.append(sym)
                 
-                # Subscribe to market data with POSITION PRIORITY
+                # Subscribe to market data
                 if sym not in self.mdb._subs:
                     try:
                         self.mdb.subscribe(sym, r["contract"])
                         logger.info(f"Subscribed to {sym} (POSITION priority)")
                     except Exception as e:
                         logger.warning(f"Subscribe failed for {sym}: {e}")
-                else:
-                    # Already subscribed, update priority to ensure positions are protected
-                    try:
-                        self.mdb._tracker.set_priority(sym, PRIORITY_POSITION)
-                        logger.debug(f"Updated {sym} to POSITION priority")
-                    except Exception as e:
-                        logger.warning(f"Priority update failed for {sym}: {e}")
             
             self._last_pos_sync = time.time()
             STATE.mark_pos_sync()
@@ -118,7 +117,7 @@ class TradeManager:
                 logger.info(f"Filtered {len(skipped)} non-tradable symbols: {', '.join(skipped[:5])}")
             logger.info(f"Tracking {len(self.positions)} tradable positions: {', '.join(list(self.positions.keys())[:5])}")
             
-            # Build position rows for dashboard WITH EMA CALCULATIONS
+            # Build position rows for STATE/dashboard WITH EMA CALCULATIONS
             pos_rows = []
             for sym, p in self.positions.items():
                 try:
@@ -131,7 +130,7 @@ class TradeManager:
                 ema8_val = None
                 ema21_val = None
                 try:
-                    closes = self.mdb.get_series(sym, 50)  # Get last 50 prices
+                    closes = self.mdb.get_series(sym, 50)
                     if len(closes) >= 21:
                         ema8_val = ema(closes, 8)
                         ema21_val = ema(closes, 21)
@@ -143,13 +142,21 @@ class TradeManager:
                 except Exception as e:
                     logger.debug(f"EMA calc failed for {sym}: {e}")
                 
+                # Adjust avg cost for futures (divide by multiplier for display)
+                avg_display = p["avg"]
+                if p["sec_type"] == "FUT" and p["multiplier"] > 1:
+                    avg_display = p["avg"] / p["multiplier"]
+                
                 pos_rows.append({
                     "symbol": sym,
                     "qty": p["qty"],
-                    "avg": p["avg"],
+                    "avg": avg_display,  # Display price (adjusted for futures)
                     "last": last,
                     "ema8": ema8_val,
-                    "ema21": ema21_val
+                    "ema21": ema21_val,
+                    "sec_type": p["sec_type"],
+                    "multiplier": p["multiplier"],
+                    "local_symbol": p["local_symbol"],
                 })
             
             STATE.positions_rows = pos_rows
@@ -163,7 +170,7 @@ class TradeManager:
     def heartbeat(self):
         """
         Main heartbeat loop - called every ~1s from main.py.
-        Handles periodic position syncs and price updates WITH EMA CALCULATIONS.
+        Handles periodic position syncs and price updates.
         """
         now = time.time()
         
@@ -177,7 +184,7 @@ class TradeManager:
             logger.info("Periodic position resync")
             self._sync_positions()
 
-        # Quick price update for dashboard (with EMA calculations)
+        # Quick price update for dashboard (with EMAs)
         try:
             out = []
             for sym, p in self.positions.items():
@@ -194,7 +201,6 @@ class TradeManager:
                     if len(closes) >= 21:
                         ema8_val = ema(closes, 8)
                         ema21_val = ema(closes, 21)
-                        # Convert nan to None for dashboard
                         if ema8_val is not None and math.isnan(ema8_val):
                             ema8_val = None
                         if ema21_val is not None and math.isnan(ema21_val):
@@ -202,13 +208,21 @@ class TradeManager:
                 except Exception as e:
                     logger.debug(f"EMA calc failed for {sym}: {e}")
                 
+                # Adjust avg cost for display
+                avg_display = p["avg"]
+                if p["sec_type"] == "FUT" and p["multiplier"] > 1:
+                    avg_display = p["avg"] / p["multiplier"]
+                
                 out.append({
                     "symbol": sym,
                     "qty": p["qty"],
-                    "avg": p["avg"],
+                    "avg": avg_display,
                     "last": last,
                     "ema8": ema8_val,
-                    "ema21": ema21_val
+                    "ema21": ema21_val,
+                    "sec_type": p["sec_type"],
+                    "multiplier": p["multiplier"],
+                    "local_symbol": p["local_symbol"],
                 })
             
             if out:
@@ -218,12 +232,7 @@ class TradeManager:
             logger.debug(f"Heartbeat pricing update failed: {e}")
 
     def metrics(self) -> dict:
-        """
-        Return current metrics for dashboard and logging.
-        
-        Returns:
-            Dict with current system metrics
-        """
+        """Return current metrics for dashboard and logging."""
         subs = list(STATE.symbols_subscribed)
         return {
             "ib_connected": STATE.ib_connected,

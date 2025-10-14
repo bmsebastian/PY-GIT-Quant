@@ -1,33 +1,32 @@
-# scanner_coordinator.py - v15 Multi-Asset Subscription Manager
+# scanner_coordinator.py - v15B Simplified (Main Thread)
 """
-Manages 50 IB subscription limit across 4 asset classes:
-1. Positions (priority 100) - unlimited, takes precedence
-2. Futures watchlist (priority 90) - fixed 7 symbols
-3. Unusual options (priority 60) - top 10 rotating
-4. Scanner stocks (priority 25) - top 10-30 rotating
+Manages 50 IB subscription limit across multiple asset classes:
+1. Positions (always subscribed)
+2. Futures watchlist (7 fixed symbols)
+3. Scanner stocks (top 10-30 rotating)
 
-Dynamic allocation based on available capacity.
+Runs in main thread to avoid asyncio complications.
 """
 
 import logging
 import time
-import threading
-from typing import Dict, Set, List, Optional
+from typing import Dict, Set, List
 from collections import defaultdict
-from ib_insync import Stock, Future, Option
+from ib_insync import Stock, Future
 
 from config import *
 from state_bus import STATE
 from professional_scanner import ProfessionalScanner
-from options_scanner import OptionsScanner
 
 logger = logging.getLogger(__name__)
 
 
 class SubscriptionManager:
     """
-    Centralized manager for all IB market data subscriptions.
-    Enforces 50-subscription limit with priority system.
+    Centralized manager for IB market data subscriptions.
+    Enforces 50-subscription limit with priority tracking.
+    
+    Runs in main thread - call tick() from main loop.
     """
     
     def __init__(self, ib, market_bus):
@@ -40,90 +39,65 @@ class SubscriptionManager:
         
         # Scanners
         self.pro_scanner = ProfessionalScanner(ib, market_bus)
-        self.options_scanner = OptionsScanner(ib)
-        
-        # Background thread for scanning
-        self._running = False
-        self._scan_thread = None
         
         # Timing
         self._last_stock_scan = 0
-        self._last_options_scan = 0
+        self._last_futures_sync = 0
         self._last_cleanup = 0
+        self._last_log = 0
         
-        logger.info(f"Subscription Manager initialized - {self._capacity} slots available")
+        logger.info(f"Subscription Manager initialized - {self._capacity} slots")
     
     def start(self):
-        """Start background scanning threads."""
-        if self._running:
-            return
-        
-        self._running = True
-        self._scan_thread = threading.Thread(target=self._scan_loop, daemon=True)
-        self._scan_thread.start()
-        
-        logger.info("Scanner coordinator started")
+        """Start scanner (no thread needed)."""
+        logger.info("✓ Scanner coordinator started (main thread mode)")
     
     def stop(self):
-        """Stop scanning threads."""
-        self._running = False
-        if self._scan_thread:
-            self._scan_thread.join(timeout=5)
-        logger.info("Scanner coordinator stopped")
+        """Stop scanner."""
+        logger.info("✓ Scanner coordinator stopped")
     
-    def _scan_loop(self):
-        """Background loop for all scanning operations."""
-        while self._running:
-            try:
-                now = time.time()
-                
-                # 1. Always ensure positions are subscribed first
-                self._sync_positions()
-                
-                # 2. Ensure futures watchlist is subscribed
+    def tick(self):
+        """
+        Main tick function - call this from main loop every ~1-10 seconds.
+        Handles all scanning and subscription management.
+        """
+        now = time.time()
+        
+        try:
+            # 1. Always ensure positions subscribed first
+            self._sync_positions()
+            
+            # 2. Ensure futures watchlist subscribed (every 30s)
+            if now - self._last_futures_sync >= 30:
                 self._sync_futures_watchlist()
-                
-                # 3. Run stock scanner (every 60s)
-                if now - self._last_stock_scan >= SCANNER_INTERVAL_SECONDS:
-                    self._run_stock_scanner()
-                    self._last_stock_scan = now
-                
-                # 4. Run options scanner (every 120s)
-                if now - self._last_options_scan >= OPTIONS_SCAN_INTERVAL:
-                    self._run_options_scanner()
-                    self._last_options_scan = now
-                
-                # 5. Cleanup stale subscriptions (every 60s)
-                if now - self._last_cleanup >= 60:
-                    self._cleanup_stale()
-                    self._last_cleanup = now
-                
-                # Log status
+                self._last_futures_sync = now
+            
+            # 3. Run stock scanner (every 60s)
+            if now - self._last_stock_scan >= SCANNER_INTERVAL_SECONDS:
+                self._run_stock_scanner()
+                self._last_stock_scan = now
+            
+            # 4. Cleanup stale subscriptions (every 60s)
+            if now - self._last_cleanup >= 60:
+                self._cleanup_stale()
+                self._last_cleanup = now
+            
+            # 5. Log status (every 30s)
+            if now - self._last_log >= 30:
                 self._log_status()
+                self._last_log = now
                 
-                # Sleep between iterations
-                time.sleep(10)
-                
-            except Exception as e:
-                logger.error(f"Scan loop error: {e}", exc_info=True)
-                time.sleep(10)
+        except Exception as e:
+            logger.error(f"Tick error: {e}", exc_info=True)
     
     def _get_current_capacity(self) -> int:
-        """Calculate current available subscription slots."""
+        """Calculate available subscription slots."""
         return self._capacity - len(self._subscriptions)
-    
-    def _get_priority_breakdown(self) -> Dict[int, int]:
-        """Get count of subscriptions by priority level."""
-        breakdown = defaultdict(int)
-        for symbol, info in self._subscriptions.items():
-            priority = info['priority']
-            breakdown[priority] += 1
-        return dict(breakdown)
     
     def _subscribe(self, symbol: str, contract, priority: int) -> bool:
         """
-        Subscribe to a symbol with given priority.
-        Returns True if successful, False if at capacity.
+        Subscribe with priority tracking.
+        Returns True if successful.
         """
         # Already subscribed?
         if symbol in self._subscriptions:
@@ -131,11 +105,13 @@ class SubscriptionManager:
             if priority > self._subscriptions[symbol]['priority']:
                 self._subscriptions[symbol]['priority'] = priority
                 logger.debug(f"Updated {symbol} priority to {priority}")
+            # Update activity
+            self._subscriptions[symbol]['last_activity'] = time.time()
             return True
         
         # Check capacity
         if self._get_current_capacity() <= 0:
-            # Try to free space by removing lowest priority
+            # Try to free space
             if not self._make_room(priority):
                 logger.warning(f"Cannot subscribe {symbol}: at capacity")
                 return False
@@ -149,15 +125,15 @@ class SubscriptionManager:
                 'timestamp': time.time(),
                 'last_activity': time.time()
             }
-            logger.info(f"Subscribed {symbol} (priority {priority}) - {len(self._subscriptions)}/{self._capacity}")
+            logger.info(f"Subscribed {symbol} (pri {priority}) - {len(self._subscriptions)}/{self._capacity}")
             return True
             
         except Exception as e:
-            logger.error(f"Subscribe error for {symbol}: {e}")
+            logger.error(f"Subscribe error {symbol}: {e}")
             return False
     
     def _unsubscribe(self, symbol: str):
-        """Unsubscribe from a symbol."""
+        """Unsubscribe from symbol."""
         if symbol not in self._subscriptions:
             return
         
@@ -172,14 +148,14 @@ class SubscriptionManager:
             logger.info(f"Unsubscribed {symbol} - {len(self._subscriptions)}/{self._capacity}")
             
         except Exception as e:
-            logger.error(f"Unsubscribe error for {symbol}: {e}")
+            logger.error(f"Unsubscribe error {symbol}: {e}")
     
     def _make_room(self, required_priority: int) -> bool:
         """
-        Free up subscription slots by removing lowest priority items.
-        Returns True if space was freed.
+        Free slots by removing lowest priority items.
+        Returns True if space freed.
         """
-        # Find subscriptions with lower priority
+        # Find lower priority subscriptions
         candidates = [
             (symbol, info) for symbol, info in self._subscriptions.items()
             if info['priority'] < required_priority
@@ -188,10 +164,10 @@ class SubscriptionManager:
         if not candidates:
             return False
         
-        # Sort by priority (lowest first), then by last activity
+        # Sort by priority (lowest first), then by activity
         candidates.sort(key=lambda x: (x[1]['priority'], x[1]['last_activity']))
         
-        # Remove the lowest priority item
+        # Remove lowest
         symbol_to_remove = candidates[0][0]
         self._unsubscribe(symbol_to_remove)
         
@@ -199,20 +175,19 @@ class SubscriptionManager:
     
     def _sync_positions(self):
         """
-        Ensure all open positions are subscribed with highest priority.
+        Ensure all positions are subscribed with highest priority.
         Positions NEVER get removed.
         """
-        # Get positions from STATE
         positions = STATE.positions
         
         for symbol, pos_data in positions.items():
             if symbol not in self._subscriptions:
-                # Need to subscribe to this position
+                # Need to subscribe
                 contract = self._get_contract_for_position(pos_data)
                 if contract:
                     self._subscribe(symbol, contract, PRIORITY_POSITION)
             else:
-                # Update activity timestamp
+                # Update activity
                 self._subscriptions[symbol]['last_activity'] = time.time()
     
     def _get_contract_for_position(self, pos_data: Dict):
@@ -226,9 +201,6 @@ class SubscriptionManager:
             elif sec_type == 'FUT':
                 local_symbol = pos_data.get('local_symbol', symbol)
                 return Future(local_symbol, FUTURES_EXCHANGE, FUTURES_CURRENCY)
-            elif sec_type == 'OPT':
-                # Would need more details for options
-                return None
             else:
                 return None
                 
@@ -238,15 +210,20 @@ class SubscriptionManager:
     
     def _sync_futures_watchlist(self):
         """
-        Ensure all futures in watchlist are subscribed.
+        Ensure futures watchlist is subscribed.
         Fixed set of 7 futures.
         """
         for symbol in FUTURES_WATCHLIST:
             if symbol not in self._subscriptions:
-                contract = Future(symbol, FUTURES_EXCHANGE, FUTURES_CURRENCY)
                 try:
-                    self.ib.qualifyContracts(contract)
+                    contract = Future(symbol, FUTURES_EXCHANGE, FUTURES_CURRENCY)
+                    # Qualify the contract first
+                    qualified = self.ib.qualifyContracts(contract)
+                    if qualified:
+                        contract = qualified[0]
+                    
                     self._subscribe(symbol, contract, PRIORITY_FUTURES)
+                    
                 except Exception as e:
                     logger.warning(f"Could not subscribe to future {symbol}: {e}")
             else:
@@ -266,16 +243,16 @@ class SubscriptionManager:
             
             if not top_stocks:
                 logger.info("No stocks qualified (need 60+ score)")
+                STATE.scanner_results = []
                 return
             
-            # Calculate how many we can subscribe to
+            # Calculate capacity
             available = self._get_current_capacity()
-            reserved_for_options = OPTIONS_SLOTS
             
             max_stocks = min(
                 len(top_stocks),
                 SCANNER_MAX_SLOTS,
-                max(SCANNER_MIN_SLOTS, available - reserved_for_options)
+                max(SCANNER_MIN_SLOTS, available - 5)  # Keep 5 slot buffer
             )
             
             # Get top N
@@ -292,10 +269,10 @@ class SubscriptionManager:
                     contract = Stock(symbol, 'SMART', 'USD')
                     self._subscribe(symbol, contract, PRIORITY_SCANNER)
                 else:
-                    # Update activity for existing
+                    # Update activity
                     self._subscriptions[symbol]['last_activity'] = time.time()
             
-            # Remove scanner symbols that dropped out of top N
+            # Remove scanner symbols that dropped out
             scanner_subs = [
                 sym for sym, info in self._subscriptions.items()
                 if info['priority'] == PRIORITY_SCANNER
@@ -306,55 +283,17 @@ class SubscriptionManager:
                     logger.info(f"Removing {symbol} - dropped out of top {max_stocks}")
                     self._unsubscribe(symbol)
             
+            # Update STATE for dashboard
+            STATE.scanner_results = stocks_to_subscribe
+            
         except Exception as e:
             logger.error(f"Stock scanner error: {e}", exc_info=True)
-    
-    def _run_options_scanner(self):
-        """
-        Run unusual options activity scanner.
-        Subscribe to top 10 options.
-        """
-        logger.info("--- Running Options Scanner ---")
-        
-        try:
-            # Get symbols to scan for options
-            # Priority: positions, then high-scoring scanner results
-            underlying_symbols = []
-            
-            # Add position symbols
-            for symbol in STATE.positions.keys():
-                if len(underlying_symbols) < 5:
-                    underlying_symbols.append(symbol)
-            
-            # Add top scanner symbols
-            scanner_results = getattr(STATE, 'scanner_results', [])
-            for result in scanner_results[:5]:
-                symbol = result.get('symbol')
-                if symbol and symbol not in underlying_symbols:
-                    underlying_symbols.append(symbol)
-            
-            # Scan for unusual options
-            top_options = self.options_scanner.scan(underlying_symbols)
-            
-            if not top_options:
-                logger.info("No unusual options detected")
-                return
-            
-            logger.info(f"Top {len(top_options)} unusual options to monitor")
-            
-            # For now, just log them (actual option subscription would need contracts)
-            # In production, would subscribe to option contracts here
-            
-            # Update STATE
-            STATE.unusual_options = top_options
-            
-        except Exception as e:
-            logger.error(f"Options scanner error: {e}", exc_info=True)
+            STATE.scanner_results = []
     
     def _cleanup_stale(self):
         """
         Remove scanner subscriptions with no recent activity.
-        Positions and futures are never removed.
+        Positions and futures never removed.
         """
         now = time.time()
         stale_threshold = 600  # 10 minutes
@@ -374,17 +313,19 @@ class SubscriptionManager:
                 to_remove.append(symbol)
         
         if to_remove:
-            logger.info(f"Cleaning up {len(to_remove)} stale symbols: {', '.join(to_remove)}")
+            logger.info(f"Cleaning up {len(to_remove)} stale symbols: {', '.join(to_remove[:3])}")
             for symbol in to_remove:
                 self._unsubscribe(symbol)
     
     def _log_status(self):
-        """Log current subscription status."""
-        breakdown = self._get_priority_breakdown()
+        """Log subscription status."""
+        breakdown = defaultdict(int)
+        for symbol, info in self._subscriptions.items():
+            priority = info['priority']
+            breakdown[priority] += 1
         
         positions = breakdown.get(PRIORITY_POSITION, 0)
         futures = breakdown.get(PRIORITY_FUTURES, 0)
-        options = breakdown.get(PRIORITY_OPTIONS, 0)
         scanner = breakdown.get(PRIORITY_SCANNER, 0)
         
         total = len(self._subscriptions)
@@ -392,12 +333,15 @@ class SubscriptionManager:
         
         logger.info(
             f"Subscriptions: {total}/{self._capacity} "
-            f"(pos={positions} fut={futures} opt={options} scan={scanner} free={available})"
+            f"(pos={positions} fut={futures} scan={scanner} free={available})"
         )
     
     def get_status(self) -> Dict:
-        """Get detailed status for dashboard/monitoring."""
-        breakdown = self._get_priority_breakdown()
+        """Get detailed status for monitoring."""
+        breakdown = defaultdict(int)
+        for symbol, info in self._subscriptions.items():
+            priority = info['priority']
+            breakdown[priority] += 1
         
         return {
             'total': len(self._subscriptions),
@@ -405,7 +349,7 @@ class SubscriptionManager:
             'available': self._get_current_capacity(),
             'positions': breakdown.get(PRIORITY_POSITION, 0),
             'futures': breakdown.get(PRIORITY_FUTURES, 0),
-            'options': breakdown.get(PRIORITY_OPTIONS, 0),
+            'options': 0,  # Disabled in v15B
             'scanner': breakdown.get(PRIORITY_SCANNER, 0),
             'subscriptions': list(self._subscriptions.keys())
         }

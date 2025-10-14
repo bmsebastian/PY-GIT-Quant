@@ -1,4 +1,4 @@
-# professional_scanner.py - Professional-grade breakout scanner
+# professional_scanner.py - Professional-grade breakout scanner (v15B COMPLETE)
 """
 Multi-factor breakout scanner using institutional trading techniques:
 1. Relative Strength vs market (25 pts)
@@ -190,8 +190,7 @@ class ProfessionalScanner:
                     points += 5.0
             
             # Float rotation estimate (5 pts)
-            # This would need float data from IB, using volume as proxy
-            if current_vol > avg_vol * 3:  # 3x average = likely high rotation
+            if current_vol > avg_vol * 3:
                 points += 5.0
             
             return points
@@ -239,7 +238,6 @@ class ProfessionalScanner:
                 points += 5.0
             
             # Near 52-week high (5 pts)
-            # Would need 52-week data, using recent data as proxy
             recent_high = max(highs[-60:]) if len(highs) >= 60 else consolidation_high
             distance_from_high = (recent_high - current_price) / recent_high
             
@@ -268,8 +266,8 @@ class ProfessionalScanner:
             
             points = 0.0
             
-            # MACD bullish (5 pts)
-            macd_line, signal_line = macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+            # MACD bullish (5 pts) - FIX: unpack all 3 values
+            macd_line, signal_line, histogram = macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
             if not math.isnan(macd_line) and not math.isnan(signal_line):
                 if macd_line > signal_line and macd_line > 0:
                     points += 5.0
@@ -379,7 +377,7 @@ class ProfessionalScanner:
             if not math.isnan(upper) and not math.isnan(lower) and middle > 0:
                 bb_width = (upper - lower) / middle
                 
-                if bb_width > BB_WIDTH_THRESHOLD / 100:  # Convert to decimal
+                if bb_width > BB_WIDTH_THRESHOLD / 100:
                     points += 5.0
                 elif bb_width > (BB_WIDTH_THRESHOLD / 100) * 0.5:
                     points += 2.5
@@ -406,11 +404,19 @@ class ProfessionalScanner:
         
         total = sum(scores.values())
         
+        # Add last price for display
+        last_price = None
+        try:
+            last_price, _ = self.market_bus.get_last(symbol)
+        except:
+            pass
+        
         return {
             'symbol': symbol,
             'total_score': round(total, 2),
             'breakdown': scores,
             'grade': self._get_grade(total),
+            'last': last_price,
             'timestamp': time.time()
         }
     
@@ -444,9 +450,12 @@ class ProfessionalScanner:
         self._ensure_benchmark_subscribed()
         
         # Update benchmark history
-        bench_price, _ = self.market_bus.get_last(self._benchmark_symbol)
-        if bench_price:
-            self._benchmark_history.append(bench_price)
+        try:
+            bench_price, _ = self.market_bus.get_last(self._benchmark_symbol)
+            if bench_price:
+                self._benchmark_history.append(bench_price)
+        except:
+            pass
         
         logger.info("=== Professional Scan Starting ===")
         
@@ -468,9 +477,12 @@ class ProfessionalScanner:
                     self._symbol_history[symbol] = deque(maxlen=100)
                 
                 # Get current price and update history
-                price, _ = self.market_bus.get_last(symbol)
-                if price:
-                    self._symbol_history[symbol].append(price)
+                try:
+                    price, _ = self.market_bus.get_last(symbol)
+                    if price:
+                        self._symbol_history[symbol].append(price)
+                except:
+                    continue
                 
                 # Calculate composite score
                 score_data = self._calculate_composite_score(symbol)
@@ -491,9 +503,6 @@ class ProfessionalScanner:
         top_10 = scored[:10]
         
         logger.info(f"=== Scan Complete: {len(top_10)}/10 qualified ===")
-        
-        # Update STATE for dashboard
-        STATE.scanner_results = top_10
         
         # Track what changed from last scan
         current_symbols = {s['symbol'] for s in top_10}

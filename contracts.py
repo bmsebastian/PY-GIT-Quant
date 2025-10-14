@@ -1,4 +1,4 @@
-# contracts.py - Contract helper functions
+# contracts.py - Contract helper functions (v15 FIXED)
 """
 Helper functions for identifying and filtering contracts.
 """
@@ -184,3 +184,34 @@ def get_contract_multiplier(contract) -> float:
         return 100.0  # Standard option contract
     
     return 1.0
+
+
+def build_and_qualify(ib, symbol: str):
+    """
+    Build and qualify a stock contract.
+    Used by scanners to create contracts from symbols.
+    
+    Args:
+        ib: IB connection instance
+        symbol: Stock symbol
+        
+    Returns:
+        Qualified contract or None if failed
+    """
+    try:
+        from ib_insync import Stock
+        
+        contract = Stock(symbol, 'SMART', 'USD')
+        
+        # Qualify the contract
+        qualified = ib.qualifyContracts(contract)
+        
+        if qualified and len(qualified) > 0:
+            return qualified[0]
+        
+        # Fallback to unqualified
+        return contract
+        
+    except Exception as e:
+        logger.warning(f"Failed to build contract for {symbol}: {e}")
+        return None

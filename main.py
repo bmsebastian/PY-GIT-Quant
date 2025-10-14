@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# main.py - QTrade v15 with professional multi-asset system
+# main.py - QTrade v15B with scanner in main thread
 import logging
 import sys
 import time
@@ -90,7 +90,7 @@ def main():
     global tm, subscription_manager, running
     
     logger.info("=" * 60)
-    logger.info(f"QTrade v15 Professional Multi-Asset System")
+    logger.info(f"QTrade v15B Professional Multi-Asset System")
     logger.info(f"ENV={ENV} | DRY_RUN={DRY_RUN}")
     logger.info(f"Dashboard: http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
     logger.info(f"Subscription limit: {IB_MAX_SUBSCRIPTIONS}")
@@ -119,17 +119,16 @@ def main():
     except Exception as e:
         logger.warning(f"Dashboard failed to start: {e}")
     
-    # Initialize Subscription Manager (v15 scanner coordinator)
-    logger.info("Initializing v15 Subscription Manager...")
+    # Initialize Subscription Manager (NO BACKGROUND THREAD)
+    logger.info("Initializing v15B Subscription Manager...")
     try:
         subscription_manager = SubscriptionManager(
             ib=tm.ib,
             market_bus=tm.mdb
         )
         subscription_manager.start()
-        logger.info("✓ Subscription Manager started")
+        logger.info("✓ Subscription Manager started (main thread mode)")
         logger.info("  - Professional breakout scanner active")
-        logger.info("  - Unusual options scanner active")
         logger.info("  - Smart 50-subscription management active")
     except Exception as e:
         logger.warning(f"Subscription Manager initialization failed: {e}")
@@ -151,7 +150,9 @@ def main():
     hb_seq = 0
     started_at = time.time()
     last_hb_emit = 0
+    last_scanner_tick = 0
     HB_EMIT_INTERVAL = 60  # Emit heartbeat log every 60s
+    SCANNER_TICK_INTERVAL = 10  # Call scanner tick every 10s
     
     try:
         while running:
@@ -166,6 +167,15 @@ def main():
             except Exception as e:
                 logger.warning(f"TradeManager heartbeat failed: {e}")
             
+            # Scanner tick (every 10 seconds) - RUNS IN MAIN THREAD
+            now = time.time()
+            if subscription_manager and (now - last_scanner_tick >= SCANNER_TICK_INTERVAL):
+                try:
+                    subscription_manager.tick()
+                    last_scanner_tick = now
+                except Exception as e:
+                    logger.warning(f"Scanner tick failed: {e}")
+            
             # Update market phase periodically
             try:
                 phase_info = tm.mdb.get_market_phase()
@@ -174,7 +184,6 @@ def main():
                 pass  # Don't spam logs
             
             # Emit heartbeat log periodically
-            now = time.time()
             if now - last_hb_emit >= HB_EMIT_INTERVAL:
                 hb_seq += 1
                 uptime = int(now - started_at)
@@ -187,7 +196,7 @@ def main():
                 if subscription_manager:
                     status = subscription_manager.get_status()
                     sub_count = status['total']
-                    sub_breakdown = f"pos={status['positions']} fut={status['futures']} opt={status['options']} scan={status['scanner']}"
+                    sub_breakdown = f"pos={status['positions']} fut={status['futures']} scan={status['scanner']}"
                 else:
                     sub_count = len(tm.mdb._subs)
                     sub_breakdown = "legacy"
@@ -211,8 +220,7 @@ def main():
                 scanner_stats = ""
                 if subscription_manager:
                     scanner_results = getattr(STATE, 'scanner_results', [])
-                    options_results = getattr(STATE, 'unusual_options', [])
-                    scanner_stats = f" | scanner={len(scanner_results)} opt={len(options_results)}"
+                    scanner_stats = f" | scanner={len(scanner_results)}"
                 
                 # Build subscription status indicator
                 if sub_count > IB_MAX_SUBSCRIPTIONS:

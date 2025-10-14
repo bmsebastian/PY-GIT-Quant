@@ -1,4 +1,4 @@
-# ib_client.py — v14
+# ib_client.py — v15B with readonly mode fix
 import logging
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
@@ -10,8 +10,8 @@ try:
     _IB_AVAILABLE = True
 except Exception as e:
     _IB_AVAILABLE = False
-    # Minimal stubs to avoid hard crashes if ib_insync is missing during linting
-    class IB:  # type: ignore
+    # Minimal stubs
+    class IB:
         def __init__(self): self._connected = False
         def connect(self, host, port, clientId, readonly=False): self._connected=True; return self
         def disconnect(self): self._connected=False
@@ -23,17 +23,17 @@ except Exception as e:
         def reqPositions(self): return []
         def reqMarketDataType(self, *_a, **_k): pass
         def reqAccountSummary(self, *_a, **_k): return []
-    class Contract:  # type: ignore
+    class Contract:
         def __init__(self, **k): self.__dict__.update(k)
-    class Stock(Contract):  # type: ignore
+    class Stock(Contract):
         def __init__(self, symbol, exchange="SMART", currency="USD"):
             super().__init__(symbol=symbol, secType="STK", exchange=exchange, currency=currency)
-    class Option(Contract): ...  # type: ignore
-    class Future(Contract): ...  # type: ignore
-    class Forex(Contract): ...   # type: ignore
+    class Option(Contract): ...
+    class Future(Contract): ...
+    class Forex(Contract): ...
     def util_datetime(_): return None
 
-from config import IB_GATEWAY_HOST, IB_GATEWAY_PORT, IB_CLIENT_ID
+from config import IB_HOST, IB_PORT, IB_CLIENT_ID
 
 @dataclass
 class IBConnectionInfo:
@@ -42,31 +42,45 @@ class IBConnectionInfo:
     client_id: int
 
 class IBClient:
-    """Thin wrapper around ib_insync.IB for QTrade v14."""
+    """Thin wrapper around ib_insync.IB for QTrade v15B."""
     def __init__(self, info: Optional[IBConnectionInfo] = None):
-        self.info = info or IBConnectionInfo(IB_GATEWAY_HOST, IB_GATEWAY_PORT, IB_CLIENT_ID)
+        self.info = info or IBConnectionInfo(IB_HOST, IB_PORT, IB_CLIENT_ID)
         self.ib = IB()
         self._md_type_set = False
 
     # ---------- connection ----------
     def connect(self):
-        """Connect if not already connected; set live market data type."""
+        """
+        Connect with readonly=True to skip slow execution requests.
+        This prevents timeout errors when TWS is slow to respond.
+        """
         if self.ib.isConnected():
             return self.ib
         try:
-            self.ib.connect(self.info.host, self.info.port, clientId=self.info.client_id)
+            # FIX: Use readonly=True to skip execution requests
+            # This prevents timeout errors with many positions
+            self.ib.connect(
+                self.info.host, 
+                self.info.port, 
+                clientId=self.info.client_id,
+                readonly=True  # <-- KEY FIX
+            )
+            
             if hasattr(self.ib, "reqMarketDataType"):
                 try:
-                    self.ib.reqMarketDataType(1)  # 1=LIVE, IB will auto-downgrade to delayed/frozen if needed
+                    self.ib.reqMarketDataType(1)  # 1=LIVE
                     self._md_type_set = True
                 except Exception as e:
                     logger.warning(f"reqMarketDataType(1) failed: {e}")
+            
             sv = getattr(self.ib, 'serverVersion', lambda: None)()
             st = getattr(self.ib, 'serverTime', lambda: None)()
-            logger.info(f"Connected to IB @ {self.info.host}:{self.info.port} cid={self.info.client_id} sv={sv} st={st}")
+            logger.info(f"Connected to IB @ {self.info.host}:{self.info.port} cid={self.info.client_id} sv={sv} (readonly)")
+            
         except Exception as e:
             logger.exception("IB connect failed")
             raise
+        
         return self.ib
 
     def is_connected(self) -> bool:
@@ -94,10 +108,9 @@ class IBClient:
 
     # ---------- account/positions ----------
     def fetch_positions(self) -> List[Dict[str, Any]]:
-        """Return a list of positions as dicts: {symbol, conId, qty, avgCost, contract}."""
+        """Return a list of positions as dicts."""
         data = []
         try:
-            # ib_insync maintains a live cache in .positions(), but reqPositions() also works
             positions = []
             if hasattr(self.ib, 'positions'):
                 try:
@@ -111,15 +124,20 @@ class IBClient:
                     positions = []
 
             for p in positions:
-                # p has attributes: account, contract, position, avgCost
                 contract = getattr(p, 'contract', None)
                 sym = getattr(contract, 'localSymbol', None) or getattr(contract, 'symbol', None) or "?"
+                
+                # Get security type for v15 compatibility
+                sec_type = getattr(contract, 'secType', 'STK')
+                
                 data.append({
                     "symbol": sym,
                     "conId": getattr(contract, 'conId', None),
                     "qty": float(getattr(p, 'position', 0.0)),
                     "avgCost": float(getattr(p, 'avgCost', 0.0)),
                     "contract": contract,
+                    "sec_type": sec_type,  # Add for v15
+                    "local_symbol": getattr(contract, 'localSymbol', sym),  # Add for v15
                 })
         except Exception as e:
             logger.warning(f"fetch_positions failed: {e}")
@@ -151,5 +169,5 @@ class IBClient:
         return self.ib.reqMktData(contract, genericTickList, snapshot, regulatorySnapshot)
 
     def ib_handle(self) -> IB:
-        """Return underlying IB handle for components like MarketDataBus."""
+        """Return underlying IB handle for components."""
         return self.ib
