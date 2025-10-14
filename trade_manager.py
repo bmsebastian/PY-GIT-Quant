@@ -1,11 +1,11 @@
-# trade_manager.py — v15C FIX: Include contract in pos_rows
+# trade_manager.py — v15D FIX: Add exchange to futures contracts before subscribing
 import logging, time, math
 from typing import Dict, List, Tuple
 from state_bus import STATE
 from ib_client import IBClient, Contract
 from market_data import MarketDataBus
 from indicators import ema
-from config import PRIORITY_POSITION
+from config import PRIORITY_POSITION, FUTURES_EXCHANGES
 
 logger = logging.getLogger(__name__)
 
@@ -58,12 +58,52 @@ class TradeManager:
         except Exception as e:
             logger.warning(f"TradeManager stop error: {e}")
 
-    def _sync_positions(self, initial: bool = False):
+    def _fix_futures_contract(self, contract):
         """
-        Sync positions from IB and update subscriptions.
+        v15D FIX: Add exchange to futures contracts if missing.
+        IB positions() sometimes returns contracts without exchange field.
+        """
+        from ib_insync import Future
         
-        v15C FIX: Store the FULL contract object in positions
-        """
+        sec_type = getattr(contract, 'secType', None)
+        
+        if sec_type != 'FUT':
+            return contract  # Not a future, return as-is
+        
+        # Check if exchange already set
+        exchange = getattr(contract, 'exchange', None)
+        primary_exchange = getattr(contract, 'primaryExchange', None)
+        
+        if exchange and exchange != '':
+            return contract  # Already has exchange
+        
+        # Get symbol and look up exchange
+        symbol = getattr(contract, 'symbol', '')
+        correct_exchange = FUTURES_EXCHANGES.get(symbol)
+        
+        if not correct_exchange:
+            logger.warning(f"No exchange mapping for futures {symbol}")
+            return contract
+        
+        # Create new contract with exchange
+        fixed_contract = Future(
+            symbol=symbol,
+            exchange=correct_exchange,
+            currency=getattr(contract, 'currency', 'USD'),
+            lastTradeDateOrContractMonth=getattr(contract, 'lastTradeDateOrContractMonth', ''),
+            multiplier=getattr(contract, 'multiplier', ''),
+            localSymbol=getattr(contract, 'localSymbol', ''),
+        )
+        
+        # Preserve conId if available
+        if hasattr(contract, 'conId'):
+            fixed_contract.conId = contract.conId
+        
+        logger.info(f"[FIX] Added exchange={correct_exchange} to {symbol} contract")
+        return fixed_contract
+
+    def _sync_positions(self, initial: bool = False):
+        """Sync positions from IB and update subscriptions."""
         from contracts import looks_nontradable_symbol, get_contract_multiplier
         
         try:
@@ -85,22 +125,24 @@ class TradeManager:
                 
                 multiplier = get_contract_multiplier(r["contract"])
                 
-                # CRITICAL FIX: Store the FULL contract object
-                # This includes conId, lastTradeDateOrContractMonth, etc.
+                # Store position data
                 self.positions[sym] = {
                     "qty": r["qty"],
                     "avg": r["avgCost"],
-                    "contract": r["contract"],  # Full IB contract with all fields
+                    "contract": r["contract"],
                     "sec_type": r.get("sec_type", "STK"),
                     "local_symbol": r.get("local_symbol", sym),
                     "multiplier": multiplier,
                 }
                 new_syms.append(sym)
                 
+                # Subscribe if not already subscribed
                 if sym not in self.mdb._subs:
                     try:
-                        # Use the full contract from IB
-                        self.mdb.subscribe(sym, r["contract"])
+                        # v15D FIX: Fix futures contract BEFORE subscribing!
+                        fixed_contract = self._fix_futures_contract(r["contract"])
+                        
+                        self.mdb.subscribe(sym, fixed_contract)
                         logger.info(f"Subscribed to {sym} (POSITION priority)")
                     except Exception as e:
                         logger.warning(f"Subscribe failed for {sym}: {e}")
@@ -113,7 +155,6 @@ class TradeManager:
             logger.info(f"Tracking {len(self.positions)} tradable positions: {', '.join(list(self.positions.keys()))}")
             
             # Build position rows for STATE/dashboard
-            # v15C FIX: Include the contract object!
             pos_rows = []
             for sym, p in self.positions.items():
                 try:
@@ -152,7 +193,7 @@ class TradeManager:
                     "sec_type": p["sec_type"],
                     "multiplier": p["multiplier"],
                     "local_symbol": p["local_symbol"],
-                    "contract": p["contract"],  # v15C FIX: Include contract!
+                    "contract": p["contract"],
                 })
             
             STATE.positions_rows = pos_rows
@@ -213,7 +254,7 @@ class TradeManager:
                     "sec_type": p["sec_type"],
                     "multiplier": p["multiplier"],
                     "local_symbol": p["local_symbol"],
-                    "contract": p["contract"],  # v15C FIX: Include contract!
+                    "contract": p["contract"],
                 })
             
             if out:

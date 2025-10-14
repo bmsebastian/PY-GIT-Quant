@@ -1,0 +1,570 @@
+QTrade v15C → v15D Session Handoff Summary
+Date: October 14, 2025
+Session Duration: ~4 hours
+Status: 90% Complete - Critical Bug Remaining
+
+🎯 Session Goal
+Fix v15B issues and achieve fully operational multi-asset trading system with:
+
+Working futures data feeds
+Professional scanner producing results
+All positions displaying correctly in dashboard
+
+
+✅ What's Working (v15C)
+Core System ✅
+
+IB Connection: Connected via readonly mode (prevents timeout)
+Position Tracking: 5 positions tracked (3 stocks, 2 futures)
+Dashboard: Live at http://localhost:8052, showing 4 sections
+Subscription Management: 13/50 subscriptions active, capacity management working
+Market Data Flow: Stocks getting live prices (TOGI, MRAI, TSLA working)
+Main Thread Architecture: Scanner running in main loop (no async issues)
+Extended Hours: 24/7 market data with pre/after hours support
+
+Verified Working Stocks ✅
+TOGI: $0.09 (live updates, +53.14% P&L)
+MRAI: $1.47 (live updates, -46.64% P&L)
+TSLA: $429.10 (live updates, -7.27% P&L)
+Position Filtering ✅
+Successfully filters out 7 non-tradable symbols:
+
+OTC stocks (ending in Q)
+CVR rights (.CVR)
+Warrants (.W, .WS)
+Delisted (.OLD)
+
+Files Modified ✅
+All files have no unicode characters (Windows compatible):
+
+main.py - Removed checkmarks, added debug logging
+market_data.py - ASCII characters, price flow to STATE
+dashboard_server.py - Multi-asset display with futures section
+scanner_coordinator.py - Simplified futures, main thread mode
+config.py - Lowered scanner threshold to 40 (from 60)
+ib_client.py - Readonly mode to prevent timeout
+trade_manager.py - v15C fix includes contract in positions
+
+
+🔴 Critical Issues (Must Fix in v15D)
+Issue #1: Futures Prices Not Flowing 🔴 CRITICAL
+Symptom:
+NQZ5: $0.00 (age: 999s) - Expected: $24,781.25
+CLZ5: $0.00 (age: 999s) - Expected: $58.33
+Root Cause Identified:
+Error 321: Please enter a local symbol or an expiry, 
+contract: Future(symbol='NQZ5', exchange='CME', currency='USD')
+The Problem:
+
+When requesting historical data, market_data.py creates a NEW futures contract
+This new contract is missing critical fields: conId, lastTradeDateOrContractMonth
+IB rejects the incomplete contract with Error 321
+
+What IB Actually Has:
+pythonPortfolioItem(contract=Future(
+    conId=563947738,  # MISSING in our request!
+    symbol='NQ',
+    lastTradeDateOrContractMonth='20251219',  # MISSING in our request!
+    localSymbol='NQZ5',
+    exchange='CME'
+))
+Fix Required:
+
+market_data.py line ~271: Use the ACTUAL subscribed contract (from self._subs)
+trade_manager.py line ~85: Ensure contract field is included in pos_rows
+scanner_coordinator.py line ~178: Use the contract from pos_data.get('contract')
+
+Status: Fixed in artifacts but NOT YET TESTED
+
+Issue #2: Scanner Producing 0 Results 🟡 MEDIUM
+Symptom:
+--- Running Stock Scanner ---
+Market scanner found 0 candidates
+Potential Causes:
+
+IB market scanner returning empty results (check subscription limits)
+Scoring threshold still too high (lowered to 40, may need 30)
+Market conditions (low volume during test time)
+Professional scanner not finding SPY data for relative strength
+
+Diagnostic Needed:
+
+Check if reqScannerData() is actually returning results
+Add debug logging to see candidate count before scoring
+Verify SPY benchmark is subscribed and has data
+
+
+Issue #3: Futures Watchlist All $0.00 🟡 MEDIUM
+Symptom:
+Futures Watchlist (7 symbols):
+NQ, ES, CL, GC, ZB, RTY, YM - All showing $0.00
+Root Cause: Same as Issue #1
+
+Futures watchlist subscription creates incomplete contracts
+Historical data requests fail with Error 321
+No fallback mechanism for watchlist futures
+
+Fix Required:
+
+scanner_coordinator.py _sync_futures_watchlist(): Need to use reqContractDetails() to get proper contracts
+Alternative: Skip futures watchlist entirely, only monitor position futures
+
+
+📊 System Metrics (Current State)
+Dashboard Status
+IB: Connected ✅
+Market: REGULAR ✅
+Subscriptions: 13/50 [OK] ✅
+Uptime: 474s ✅
+Phase: regular ✅
+
+Positions: 5 tracked
+  - 3 stocks working ✅
+  - 2 futures NOT working 🔴
+
+Futures Watchlist: 7 symbols
+  - All showing $0.00 🔴
+
+Scanner: 0 results 🟡
+Options: 0 results (disabled)
+Subscription Breakdown
+Total: 13/50 (26% capacity)
+  Positions: 5 (TOGI, MRAI, NQZ5, TSLA, CLZ5)
+  Futures: 0 (watchlist not working)
+  Scanner: 0 (not finding candidates)
+  Free: 37 slots
+
+🏗️ Architecture Overview
+v15C Architecture
+QTrade v15C Professional Multi-Asset System
+├── main.py (Main Loop)
+│   ├── TradeManager.heartbeat() every 30s
+│   ├── SubscriptionManager.tick() every 10s
+│   └── Heartbeat logging every 60s
+│
+├── TradeManager
+│   ├── Position sync (5s warmup, 5min normal)
+│   ├── Market data subscriptions
+│   └── STATE updates with contract objects
+│
+├── MarketDataBus
+│   ├── Live tickers (working for stocks)
+│   ├── Historical fallback (failing for futures) 🔴
+│   └── Extended hours support (4AM-8PM ET)
+│
+├── SubscriptionManager (Main Thread)
+│   ├── Position sync (priority 100)
+│   ├── Futures watchlist (priority 90) 🔴
+│   └── Scanner stocks (priority 25)
+│
+├── ProfessionalScanner
+│   ├── IB reqScannerData() for candidates
+│   ├── 6-factor scoring (0-100 scale)
+│   └── Threshold: 40+ to qualify
+│
+└── Dashboard (Flask)
+    ├── 4 sections (positions, futures, scanner, options)
+    └── 2-second refresh rate
+Data Flow (Working for Stocks)
+IB Position → TradeManager → STATE.positions → Dashboard ✅
+IB Ticker → MarketDataBus → STATE.prices → Dashboard ✅
+Data Flow (Broken for Futures)
+IB Position → TradeManager → STATE.positions ✅
+Historical Request → Error 321 (incomplete contract) 🔴
+STATE.prices[futures] = $0.00 🔴
+Dashboard shows $0.00 🔴
+
+📁 File Status (v15C)
+Core Files (Modified in v15C)
+FileStatusKey Changesmain.py✅ CleanNo unicode, debug logging readyconfig.py✅ CleanScanner threshold = 40ib_client.py✅ WorkingReadonly mode prevents timeouttrade_manager.py🟡 Needs TestIncludes contract in pos_rows (v15C fix)market_data.py🟡 Needs TestUses subscribed contract (v15C fix)scanner_coordinator.py🟡 Needs TestSimplified futures, main threaddashboard_server.py✅ WorkingMulti-asset displaystate_bus.py✅ WorkingThread-safe with positions propertyprofessional_scanner.py✅ Working6-factor scoring system
+Support Files (Unchanged)
+
+indicators.py ✅
+contracts.py ✅
+options_scanner.py ✅ (disabled)
+
+New Files (v15C)
+
+check_api.py - Dashboard diagnostics ✅
+check_api_simple.py - No-dependency version ✅
+debug_state.py - STATE inspector (doesn't work - separate process issue)
+
+
+🔧 v15C Fixes Applied (Not Yet Tested)
+Fix #1: trade_manager.py - Include Contract
+Line ~85: Added "contract": p["contract"] to pos_rows
+pythonpos_rows.append({
+    "symbol": sym,
+    "contract": p["contract"],  # v15C FIX
+    # ... other fields
+})
+Fix #2: market_data.py - Use Subscribed Contract
+Line ~271: Changed to use actual subscribed contract
+python# OLD: Created new incomplete contract
+# NEW: Uses self._subs[symbol] which has ALL fields
+contract, ticker = self._subs.get(symbol, (None, None))
+Fix #3: scanner_coordinator.py - Use Position Contract
+Line ~178: Uses contract from positions
+pythoncontract = pos_data.get('contract')  # Full IB contract
+if contract:
+    self._subscribe(symbol, contract, PRIORITY_POSITION)
+
+🧪 Testing Checklist for v15D
+Immediate Tests (After Installing Fixes)
+
+Restart QTrade with Latest Files
+
+bash   python main.py
+
+Run API Diagnostics
+
+bash   python check_api.py
+Expected Output:
+   === POSITIONS ===
+   CLZ5   FUT  last=$58.33 pnl=$-3402  ✅ (NOT $0.00!)
+   NQZ5   FUT  last=$24781 pnl=$-5702  ✅ (NOT $0.00!)
+
+Check Logs for Success
+
+bash   Get-Content qtrade.log -Tail 50 | Select-String "Historical"
+Expected:
+   [OK] Historical CLZ5: $58.33 from 2025-10-14...  ✅
+   [OK] Historical NQZ5: $24781.25 from 2025-10-14...  ✅
+NOT:
+   Error 321: Please enter a local symbol  🔴
+
+Verify Dashboard
+
+Open http://localhost:8052
+Futures should show live prices
+Data age should be < 60s
+
+
+
+
+🎯 v15D Goals (Priority Order)
+P0: Critical (Must Fix)
+
+✅ Verify Futures Fix Works
+
+Install trade_manager.py v15C
+Install market_data.py v15C
+Install scanner_coordinator.py v15C
+Restart and test
+Confirm CLZ5 and NQZ5 show live prices
+
+
+
+P1: High (Should Fix)
+
+Get Scanner Producing Results
+
+Debug why IB scanner returns 0 candidates
+Consider lowering threshold to 30 if needed
+Add more debug logging to professional_scanner.py
+Test during high-volume hours (10 AM - 2 PM ET)
+
+
+Fix Futures Watchlist
+
+Either: Use reqContractDetails() to build proper contracts
+Or: Remove futures watchlist entirely (just monitor positions)
+
+
+
+P2: Medium (Nice to Have)
+
+Add Alerts System
+
+Email notifications on breakout signals
+Slack webhook integration
+Position P&L threshold alerts
+
+
+Scanner Improvements
+
+Add more lenient scoring preset
+Add scanner history/backtest mode
+Save top scanner picks over time
+
+
+Options Scanner
+
+Enable unusual options activity detection
+Add to dashboard rotation
+Set priority = 60 for top 10
+
+
+
+P3: Low (Future)
+
+Order Execution
+
+Move from scanning to trading
+Risk management integration
+Position sizing algorithm
+
+
+Backtesting Module
+
+Test scanner on historical data
+Performance metrics
+Strategy optimization
+
+
+
+
+💾 Installation Files for v15D
+Must Install (3 Files)
+Download from v15C artifacts:
+
+trade_manager.py (v15C - Include Contract in Positions)
+
+Critical: Adds contract to pos_rows
+Without this, futures can't get historical data
+
+
+market_data.py (v15C FIXED - No Unicode)
+
+Critical: Uses subscribed contract for historical
+Without this, Error 321 persists
+
+
+scanner_coordinator.py (v15C - Simple Futures)
+
+Important: Uses position contracts correctly
+Without this, subscription fails
+
+
+
+Already Installed
+
+config.py (threshold = 40)
+main.py (no unicode)
+dashboard_server.py (multi-asset)
+ib_client.py (readonly mode)
+
+
+🐛 Known Issues & Workarounds
+Issue: Windows Unicode Errors
+Symptom: UnicodeEncodeError: 'charmap' codec can't encode '\u2713'
+Fix: All checkmarks replaced with [OK] in v15C
+Workaround: Run chcp 65001 before starting QTrade
+Issue: IB Connection Timeout
+Symptom: 8+ second delay on startup
+Fix: ib_client.py uses readonly=True
+Result: Startup now < 2 seconds
+Issue: Error 162 (Scanner Subscription Cancelled)
+Symptom: Appears every 60s in logs
+Impact: Cosmetic only, doesn't affect functionality
+Cause: IB cancels unused scanner subscriptions
+Fix: Can be ignored
+Issue: Futures Exchange Wrong
+Discovered: YM is CBOT not CME, CL is NYMEX not CME
+Status: Fixed in scanner_coordinator.py exchange mapping
+Verify: Check logs show correct exchanges
+
+📊 Test Data Reference
+Current Positions (Paper Account DU3780089)
+Symbol | Type | Qty | Avg Cost    | Current   | P&L
+-------|------|-----|-------------|-----------|----------
+TOGI   | STK  | 3905| $0.06       | $0.09     | +$119 ✅
+MRAI   | STK  | 363 | $2.76       | $1.47     | -$466 ✅
+NQZ5   | FUT  | 1   | $25,066.36  | $24,781   | -$5,702 🔴
+TSLA   | STK  | 100 | $462.76     | $429.10   | -$3,366 ✅
+CLZ5   | FUT  | 1   | $61.73      | $58.33    | -$3,402 🔴
+IB Contract Details (From Logs)
+python# NQ Futures
+Future(
+    conId=563947738,
+    symbol='NQ',
+    lastTradeDateOrContractMonth='20251219',
+    multiplier='20',
+    primaryExchange='CME',
+    currency='USD',
+    localSymbol='NQZ5',
+    tradingClass='NQ'
+)
+
+# CL Futures
+Future(
+    conId=256019341,
+    symbol='CL',
+    lastTradeDateOrContractMonth='20251120',
+    multiplier='1000',
+    primaryExchange='NYMEX',
+    currency='USD',
+    localSymbol='CLZ5',
+    tradingClass='CL'
+)
+
+🔍 Diagnostic Commands for v15D
+Check Futures Prices
+powershellpython check_api.py
+# Should show CLZ5 and NQZ5 with live prices
+Check Logs for Errors
+powershellGet-Content qtrade.log -Tail 100 | Select-String "Error"
+Check Historical Data Success
+powershellGet-Content qtrade.log | Select-String "Historical" | Select-String "OK"
+Check Subscriptions
+powershellGet-Content qtrade.log | Select-String "Subscribed position"
+Live Monitor
+powershellGet-Content qtrade.log -Wait -Tail 20
+
+🎓 Key Learnings (v15B → v15C)
+1. Futures Contracts Are Complex
+
+Can't just create Future('CLZ5', 'NYMEX', 'USD')
+Need: conId, lastTradeDateOrContractMonth, etc.
+Must use the EXACT contract IB gives us
+Historical data requests validate ALL fields
+
+2. Exchanges Matter
+
+CL = NYMEX not CME
+GC = COMEX not CME
+YM = CBOT not CME
+Wrong exchange = Error 200 or Error 321
+
+3. Windows Unicode Issues
+
+Python logs fail with checkmarks (✓, ✗)
+Must use ASCII ([OK], [WARN], [ERROR])
+Or: Change console encoding with chcp 65001
+
+4. IB Readonly Mode
+
+Without readonly=True: 8+ second connection time
+With readonly=True: < 2 second connection time
+QTrade doesn't need execution history anyway
+
+5. Position Data Flow
+
+IB provides full contract in positions
+Must preserve contract through entire chain:
+
+ib.positions() → trade_manager → STATE → scanner_coordinator
+
+
+If contract lost anywhere, historical data fails
+
+
+📝 Code Snippets for v15D
+Debug: Check if Contract Has Required Fields
+python# Add to scanner_coordinator.py line 180
+contract = pos_data.get('contract')
+if contract:
+    logger.info(f"Contract for {symbol}: "
+                f"conId={getattr(contract, 'conId', None)}, "
+                f"expiry={getattr(contract, 'lastTradeDateOrContractMonth', None)}")
+Debug: Log Historical Request Details
+python# Add to market_data.py line 280
+logger.info(f"Historical request contract: "
+            f"symbol={contract.symbol}, "
+            f"localSymbol={getattr(contract, 'localSymbol', None)}, "
+            f"conId={getattr(contract, 'conId', None)}")
+Test: Verify STATE Has Contracts
+python# In Python REPL while QTrade running
+from state_bus import STATE
+for sym, pos in STATE.positions.items():
+    contract = pos.get('contract')
+    print(f"{sym}: contract={contract is not None}")
+
+🚀 Quick Start for v15D
+Step 1: Install Critical Fixes
+bashcd C:\Users\bmseb\QTrade
+
+# Backup current
+copy trade_manager.py trade_manager.py.v15c_backup
+copy market_data.py market_data.py.v15c_backup
+copy scanner_coordinator.py scanner_coordinator.py.v15c_backup
+
+# Download and replace:
+# 1. trade_manager.py (v15C)
+# 2. market_data.py (v15C)
+# 3. scanner_coordinator.py (v15C)
+Step 2: Restart and Test
+bashpython main.py
+Step 3: Verify Fixes
+bash# In another terminal:
+python check_api.py
+
+# Should show:
+# CLZ5   FUT  last=$58.33  ✅
+# NQZ5   FUT  last=$24781  ✅
+Step 4: If Still Broken
+bash# Check logs for the issue:
+Get-Content qtrade.log -Tail 50
+
+# Look for:
+# - "Error 321" = contract still incomplete
+# - "Error 200" = wrong exchange
+# - "[OK] Historical" = working!
+
+📞 Support Info
+Test Environment
+
+OS: Windows 11
+Python: 3.13
+IB: TWS Paper Trading (port 7497)
+Account: DU3780089
+Python Env: .venv (virtual environment)
+
+File Locations
+C:\Users\bmseb\QTrade\
+├── main.py
+├── config.py
+├── trade_manager.py
+├── market_data.py
+├── scanner_coordinator.py
+├── dashboard_server.py
+├── professional_scanner.py
+├── ib_client.py
+├── state_bus.py
+├── indicators.py
+├── contracts.py
+└── qtrade.log
+Critical Log Lines to Check
+bash# Success indicators:
+"[OK] TradeManager started"
+"Subscribed position CLZ5 (FUT)"
+"[OK] Historical CLZ5: $58.33"
+"Subscriptions: 13/50 (pos=5 fut=7 scan=0)"
+
+# Failure indicators:
+"Error 321"
+"Error 200"
+"[WARN] No historical bars"
+"Market scanner found 0 candidates"
+
+✅ v15C Success Criteria
+
+ No unicode crashes
+ IB connects without timeout
+ Dashboard loads and displays
+ Subscriptions stay ≤50
+ Stock positions show live prices
+ Futures positions show live prices 🔴 PENDING
+ Scanner produces results 🟡 PENDING
+ No crashes for extended runtime
+
+Status: 5/8 complete (62.5%)
+
+🎯 v15D Session Goal
+Primary: Get futures prices working (CLZ5, NQZ5 show live data instead of $0.00)
+Secondary: Get scanner producing at least 1 result
+Success Definition:
+python check_api.py
+
+=== POSITIONS ===
+CLZ5   FUT  last=$58.33 pnl=$-3402  ✅
+NQZ5   FUT  last=$24781 pnl=$-5702  ✅
+
+=== SCANNER RESULTS ===
+Total: 5  ✅
+  AAPL   score=45.2 grade=C
+  MSFT   score=42.8 grade=C
+
+End of v15C Summary
+Ready for v15D Session 🚀
+Last Updated: 2025-10-14 15:30 PT
